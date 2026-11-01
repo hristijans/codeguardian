@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 0.2 Run the stack and tests.** Unit 1 needs verifying before Unit 2 starts.
+**Next step: 0.3 Make the `/health` test enforce the milestone.** The Unit 1 gaps need closing before Unit 2 starts.
 
 ## How to use this plan
 
@@ -24,15 +24,15 @@ Later units may be split into smaller steps when they are reached.
 
 ## Phase 0: Finish Unit 1
 
-The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main.py`, and the test harness) are written, but stay unverified until step 0.2 passes.
+The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main.py`, and the test harness) are verified as running. The remaining steps close the gaps that verification exposed.
 
 | ID | Step | Done when | Status |
 |---|---|---|---|
 | 0.1 | Add `.gitignore` and stop tracking `.idea/` | `.env`, caches, and `.idea/` are ignored, and `.idea/` is removed from the index | ✅ |
-| 0.2 | Run the stack and tests | Compose services are healthy, and the pytest result is recorded | 🔍 |
+| 0.2 | Run the stack and tests | Compose services are healthy, and the pytest result is recorded (3 passed, `/health` 200) | ✅ |
 | 0.3 | Make the `/health` test enforce the milestone | Test requires 200 with all services healthy inside Compose | ⬜ |
-| 0.4 | Check `pytest-asyncio` compatibility | `event_loop` fixture removed or confirmed safe | ⬜ |
-| 0.5 | Always dispose the engine in `check_postgres` | Cleanup also runs when the check fails | ⬜ |
+| 0.4 | Check `pytest-asyncio` compatibility | `event_loop` fixture removed or confirmed safe, and the `asyncio_default_fixture_loop_scope` warning is gone | ⬜ |
+| 0.5 | Fix engine cleanup in `check_postgres` | Cleanup also runs when the check fails, and pytest shows no unclosed connection `ResourceWarning` | ⬜ |
 | 0.6 | First commit | History exists on `main` (made outside this plan, and includes `.idea/`) | ✅ |
 | 0.7 | Commit the Phase 0 work | Steps 0.1 to 0.5 are committed, after the user's go-ahead | ⬜ |
 | 0.8 | Fix empty `gpg.format` in `~/.gitconfig` | `git log` works without an override | ⬜ |
@@ -118,3 +118,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 
 - 2026-11-01: Blueprint corrected, learning docs created, plan added. Next: step 0.1.
 - 2026-11-01: Added `.gitignore` and untracked `.idea/` (step 0.1). Next: step 0.2.
+- 2026-11-01: Verified the running stack: 3 tests passed and `/health` returned 200 (step 0.2). Found an unclosed Postgres connection, added to step 0.5. Next: step 0.3.

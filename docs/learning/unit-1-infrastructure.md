@@ -174,9 +174,21 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 
 - **The health test can't detect an outage.** It accepts 200 or 503, so it passes when services are down, including when tests run outside Docker where hosts like `postgres` don't resolve. It does not yet enforce the Unit 1 milestone.
 - **A new engine per check.** `check_postgres` builds an engine on every call, which is fine for a small health route but not for real database code. Unit 2 onward should share one engine. It also only disposes the engine on success, so a failed check skips the cleanup.
+- **An unclosed Postgres connection.** The verified test run prints a `ResourceWarning` for an unclosed asyncpg connection. The likely cause is that `engine.dispose()` runs inside the `async with` block, while the session is still holding its connection. Moving cleanup outside the block is step 0.5, which will confirm this.
 - **Errors are returned to the caller.** The health response includes `str(e)`, which can expose internal details on a public endpoint.
 - **Passwords aren't URL-encoded.** Characters such as `@` or `/` in a password would break the derived URLs.
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
 - **`DEBUG` is defined but not used** in the code so far.
-- **The `event_loop` fixture may break on upgrades.** Overriding it is deprecated in newer `pytest-asyncio` releases. This has not been checked against the installed version.
-- **Tests were not run while writing these notes.** The explanations come from reading the code.
+- **The `event_loop` fixture may be obsolete.** Tests pass with `pytest-asyncio` 1.4.1, but pytest warns that `asyncio_default_fixture_loop_scope` is unset. Step 0.4 checks whether the fixture still does anything.
+
+## Verification record
+
+Checked on 2026-11-01 against the running Compose stack:
+
+- `docker compose ps`: `postgres`, `redis`, and `rabbitmq` were healthy, and `api` was up. `api` has no health check of its own.
+- `GET /health`: returned 200 with all three services healthy.
+- `docker compose exec -T api python -m pytest -v`: 3 passed.
+
+Versions installed: Python 3.12.16, pytest 9.2.0, pytest-asyncio 1.4.1.post1, FastAPI 0.162.0, SQLAlchemy 2.1.6, Pydantic 2.14.2, redis 8.1.0, aio-pika 10.2.1.
+
+Run tests inside the `api` container. Outside Docker, hostnames such as `postgres` don't resolve.
