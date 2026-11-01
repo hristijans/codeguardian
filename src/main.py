@@ -19,11 +19,15 @@ app = FastAPI(
 async def check_postgres(settings: Settings) -> Dict[str, Any]:
     try:
         engine = create_async_engine(settings.postgres_dsn, pool_pre_ping=True)
-        async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        async with async_session() as session:
-            result = await session.execute(text("SELECT 1"))
+        try:
+            async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+            async with async_session() as session:
+                result = await session.execute(text("SELECT 1"))
+                return {"status": "healthy" if result.scalar() == 1 else "unhealthy"}
+        finally:
+            # Runs after the session has returned its connection to the pool,
+            # and on failure too. dispose() only closes pooled connections.
             await engine.dispose()
-            return {"status": "healthy" if result.scalar() == 1 else "unhealthy"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 

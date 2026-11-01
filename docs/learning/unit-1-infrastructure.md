@@ -117,6 +117,7 @@ Each check catches its own exceptions and returns a dictionary, so one failing s
 **Postgres:** Creates an engine, opens a session, and runs `SELECT 1`. An engine manages a connection pool, and a session is one unit of work on top of it.
 - `pool_pre_ping=True` tests a pooled connection before use.
 - `expire_on_commit=False` stops objects being reloaded after a commit. In async code, an automatic reload could trigger database access where it is not allowed.
+- `engine.dispose()` sits in a `finally` block outside the `async with`. Order matters: `dispose()` closes only the connections resting in the pool, and a session holds its connection until the `async with` ends. Disposing inside the block left that connection open, and because the check builds a fresh engine each time, nothing would ever reuse or close it. Python's `finally` works like PHP's: it runs on return and on exception, so a failed check cleans up too.
 
 **Redis:** Sends `PING`. `socket_timeout=2.0` stops a stuck socket hanging the route.
 
@@ -222,8 +223,8 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 
 ## Known limitations
 
-- **A new engine per check.** `check_postgres` builds an engine on every call, which is fine for a small health route but not for real database code. Unit 2 onward should share one engine. It also only disposes the engine on success, so a failed check skips the cleanup.
-- **An unclosed Postgres connection.** The verified test run prints a `ResourceWarning` for an unclosed asyncpg connection. The likely cause is that `engine.dispose()` runs inside the `async with` block, while the session is still holding its connection. Moving cleanup outside the block is step 0.5, which will confirm this.
+- **A new engine per check.** `check_postgres` builds an engine on every call, which is fine for a small health route but not for real database code. Unit 2 onward should share one engine.
+- **Redis and RabbitMQ cleanup only runs on success.** `check_redis` and `check_rabbitmq` close their client on the success path only, so a failure partway through skips it. No warning has been seen from this, but it is the same shape as the Postgres bug fixed in step 0.5.
 - **Errors are returned to the caller.** The health response includes `str(e)`, which can expose internal details on a public endpoint.
 - **Passwords aren't URL-encoded.** Characters such as `@` or `/` in a password would break the derived URLs.
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
@@ -235,7 +236,8 @@ Checked on 2026-11-01 against the running Compose stack:
 
 - `docker compose ps`: `postgres`, `redis`, and `rabbitmq` were healthy, and `api` was up. `api` has no health check of its own.
 - `GET /health`: returned 200 with all three services healthy.
-- `docker compose exec -T api python -m pytest -v`: 3 passed at first, and 4 passed after step 0.3 tightened the health tests.
+- `docker compose exec -T api python -m pytest -v`: 3 passed at first, and 4 passed after step 0.3 tightened the health tests. After step 0.5 added two leak tests, 6 passed.
+- `docker compose exec -T api python -X dev -m pytest -q -W default`: before step 0.5 this printed `ResourceWarning` lines for unclosed asyncpg connections. After it, 6 passed with no warnings. The two leak tests failed first and passed once the fix was in, which confirmed the cause.
 
 Versions installed: Python 3.12.16, pytest 9.2.0, pytest-asyncio 1.4.1.post1, FastAPI 0.162.0, SQLAlchemy 2.1.6, Pydantic 2.14.2, redis 8.1.0, aio-pika 10.2.1.
 
