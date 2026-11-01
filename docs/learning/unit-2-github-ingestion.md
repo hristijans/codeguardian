@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/fixtures/pull_request_opened.json`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`
 
 ## GitHub settings
 
@@ -108,10 +108,40 @@ The function returns `True` or `False` and knows nothing about HTTP. Turning `Fa
 
 `tests/test_signature.py` uses the worked example from GitHub's documentation as its main case, and the value was also confirmed with `openssl`. The other expected signatures were computed with `openssl` too. Taking them from `verify_signature` itself would only show the function agrees with itself.
 
+## Webhook route: `POST /api/v1/webhooks/github/pr`
+
+The route in `src/main.py` runs these checks in a fixed order, and the order is the design:
+
+| Order | Check | If it fails |
+|---|---|---|
+| 1 | Is the signature valid over the raw bytes? | 401, nothing parsed |
+| 2 | Is this a `pull_request` event? | 200 `{"status": "ignored"}` |
+| 3 | Does the body fit `PRWebhookPayload`? | 422 `Invalid payload` |
+| 4 | Is the action `opened`, `reopened`, or `synchronize`? | 200 `{"status": "ignored"}` |
+| 5 | Accepted | 202 with `job_id` and `queued` |
+
+**Why the body isn't a function parameter.** The usual FastAPI style is `payload: PRWebhookPayload` in the signature, like type-hinting a FormRequest in a Laravel controller. FastAPI would then parse and validate the body before your code runs. That is the wrong order here, because the signature must be checked first, on the original bytes. So the route takes `request: Request`, calls `await request.body()`, and calls `model_validate_json` itself. Laravel's nearest pattern is verifying the signature in middleware before the controller reads the input.
+
+**Headers as parameters.** `x_hub_signature_256: Optional[str] = Header(default=None)` makes FastAPI read the `X-Hub-Signature-256` header. It matches on the name, turning underscores into hyphens and ignoring case. A missing header gives `None`, and `verify_signature` turns that into a rejection, so the response is 401 and not FastAPI's automatic 422.
+
+**Why ignored events get a 200.** They are valid events that need no work, and an error status would mark them as failed in GitHub's webhook delivery log. The route's default of 202 means work was accepted, so these branches change it through `response.status_code`, as `/health` does for its 503.
+
+**Why 422 hides the details.** The response says only `Invalid payload`. The sender already proved it holds the secret, but there's no need to return validation details, and the same reasoning applies to `str(e)` in the health route's known limitation.
+
+`from None` after `raise` drops the original `ValidationError` from the exception chain, so it doesn't appear as the cause of the `HTTPException`.
+
+### Tests
+
+`tests/test_webhooks.py` sends real HTTP requests through the app with `httpx`. The `webhook_secret` fixture swaps in a test secret with `dependency_overrides`, and `autouse=True` applies it to every test in the file.
+
+The order has its own tests. A bad signature on a body that isn't JSON must give 401, because a 422 would mean untrusted data was parsed. A body with unusual spacing must give 202, which would fail if the route re-encoded it before checking.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
-- **No route uses `verify_signature` yet.** It is tested as a function only, so the 401 and the use of the true raw body arrive in step 2.4.
+- **Accepted jobs go nowhere yet.** The route returns a new `job_id` with status `queued`, but nothing is saved or queued, so that ID can't be looked up and the status is only a promise. Steps 2.5 and 2.7 connect it.
+- **Any repository is accepted.** The allowlist arrives in step 2.13, so a correctly signed event from any repository gets a 202.
+- **Repeated deliveries get a second job ID.** Step 2.6 adds deduplication.
 - **A valid request can be replayed.** The signature doesn't cover a timestamp, so a captured request stays valid. Step 2.6 will catch repeats of the same delivery ID.
 - **Nothing uses the schemas yet.** The route, job store, and worker arrive in later steps, and they may show that a field is missing.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
@@ -120,6 +150,8 @@ The function returns `True` or `False` and knows nothing about HTTP. Turning `Fa
 ## Verification record
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
+
+Step 2.4, same day: 65 passed with no warnings. Five deliberate breaks were each caught and then reverted: no signature check, re-encoding the body, no event filter, no action filter, and a fixed job ID. In the running API, a signed event returned 202, a forged one 401, and a `push` event 200.
 
 Step 2.3, same day: 46 passed with no warnings. Four deliberate breaks were each caught and then reverted: no empty-secret check, comparing strings, ignoring the prefix, and using SHA-1.
 
