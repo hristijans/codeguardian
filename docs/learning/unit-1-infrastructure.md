@@ -148,6 +148,23 @@ async def async_client():
 
 `ASGITransport` sends requests directly to the app in-process, with no real server or network. Code before `yield` is setup, and code after it is teardown. This resembles Laravel's feature tests, which also call the app without a real HTTP server.
 
+### `pytest.ini`
+
+```ini
+[pytest]
+testpaths = tests
+asyncio_default_fixture_loop_scope = function
+asyncio_default_test_loop_scope = function
+```
+
+This is pytest's project configuration, and pytest picks it up automatically. It is similar in purpose to `phpunit.xml`. `testpaths` says where tests live.
+
+**Event loop scope.** An event loop is the scheduler that runs async code. The scope sets how long one loop lives, and `function` gives every test and fixture a new one. That isolates tests from each other, at a tiny cost in speed.
+
+A connection belongs to the loop that created it. When Unit 2 adds shared async clients, a client created in one loop and used in another will fail with an error such as "attached to a different loop". If a shared fixture is ever needed, it and the tests using it need a matching wider scope.
+
+**Why the old `event_loop` fixture was removed.** Older `pytest-asyncio` versions let you override a fixture of that name to control the loop. Version 1.0 removed that fixture, so the code had become a normal fixture that nothing used. `pytest --setup-show` prints the fixtures each test really sets up, and `event_loop` never appeared. Scope is now set in configuration instead. `requirements.txt` requires `pytest-asyncio>=1.0.0` to match.
+
 ### `tests/test_infrastructure.py`
 
 - `test_root_endpoint`: checks that `/` responds as expected.
@@ -211,7 +228,6 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 - **Passwords aren't URL-encoded.** Characters such as `@` or `/` in a password would break the derived URLs.
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
 - **`DEBUG` is defined but not used** in the code so far.
-- **The `event_loop` fixture may be obsolete.** Tests pass with `pytest-asyncio` 1.4.1, but pytest warns that `asyncio_default_fixture_loop_scope` is unset. Step 0.4 checks whether the fixture still does anything.
 
 ## Verification record
 

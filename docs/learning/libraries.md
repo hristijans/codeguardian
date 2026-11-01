@@ -100,6 +100,6 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **What it does:** Lets pytest run `async def` tests and fixtures.
 
-**Why it is used:** pytest cannot await a coroutine by itself. Without this plugin, an async test would not run properly.
+**Why it is used:** pytest cannot await a coroutine by itself. Without this plugin, an async test would not run properly. The project needs version 1.0 or newer, and sets its loop scope in `pytest.ini`.
 
 **Laravel equivalent:** None, because normal PHP code does not have this async model.
