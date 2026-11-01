@@ -101,3 +101,23 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Why:** The two would otherwise compete over the same schema. The saver also uses psycopg 3, so it needs a plain `postgresql://` connection string rather than the app's `postgresql+asyncpg://` one.
 
 **Implemented:** No.
+
+## D11: Keep personal data and repository links out of the repo (2026-11-01)
+
+**Decision:** Nothing personal, no real repository links, and no secrets are committed. Repositories to review come from `REVIEW_REPOSITORIES` in the environment first, and from the database once Alembic exists. Tests use placeholders.
+
+**Why:** The repo may become public, and Git history keeps whatever was committed. Treating repositories as configuration also means adding one needs no code change, which is the same idea as Laravel's `config()` over hardcoded values.
+
+**Status:** The rule is yours. The `REVIEW_REPOSITORIES` name and the env-then-database order were Claude's call.
+
+**Implemented:** The rule is. The allowlist arrives in steps 2.13 and 4.10.
+
+## D12: Keep `CLAUDE.md` local (2026-11-01)
+
+**Decision:** `CLAUDE.md` is ignored by Git and stays on your machine.
+
+**Why:** It holds agent instructions rather than project code.
+
+**Consequence:** A fresh clone has no `CLAUDE.md`. The workflow rules stay available in `docs/PLAN.md`. Earlier versions remain in commits that have not been pushed.
+
+**Implemented:** Yes.

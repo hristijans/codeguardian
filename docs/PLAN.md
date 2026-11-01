@@ -36,6 +36,8 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 0.6 | First commit | History exists on `main` (made outside this plan, and includes `.idea/`) | ✅ |
 | 0.7 | Commit the Phase 0 work | Steps 0.1 to 0.5 are committed, after the user's go-ahead | ⬜ |
 | 0.8 | Fix empty `gpg.format` in `~/.gitconfig` | `git log` works without an override | ⬜ |
+| 0.9 | Remove local dev credentials from code and Compose | `src/config.py` has no password defaults, Compose reads `.env`, and `.env.example` has placeholders | ⬜ |
+| 0.10 | Choose a commit email before pushing | Your decision on using GitHub's noreply address is made before the first push | ⬜ |
 
 ## Unit 2: GitHub ingestion and queue
 
@@ -45,6 +47,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.2 | Payload and job schemas in `src/schemas.py` | Validation tests pass with a sample payload | ⬜ |
 | 2.3 | Signature verification | Good signature passes and a bad one is rejected, checked over the raw body | ⬜ |
 | 2.4 | Webhook route with event filtering | 202 for accepted actions, no job for others, `ping` handled | ⬜ |
+| 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ⬜ |
 | 2.5 | Redis job store `src/cache.py` | Records save and read back with a 24-hour expiry | ⬜ |
 | 2.6 | Delivery deduplication | A repeated `X-GitHub-Delivery` creates no second job | ⬜ |
 | 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ⬜ |
@@ -74,6 +77,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | ID | Step | Done when | Status |
 |---|---|---|---|
 | 4.1 | Alembic setup for application tables | Migration runs up and down | ⬜ |
+| 4.10 | Reviewed repositories table | The allowlist can come from the database, with env as the fallback | ⬜ |
 | 4.2 | `AsyncPostgresSaver` with psycopg 3 | Checkpoints appear in Postgres | ⬜ |
 | 4.3 | Supervisor router | Routing tests pass for different diffs | ⬜ |
 | 4.4 | Security agent | Finds OWASP cases with a mocked LLM | ⬜ |
@@ -110,7 +114,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 
 ## Open questions
 
-- Which repository should be the first live test? Needed by 2.11.
+- Which repository should be the first live test? Needed by 2.11. Set it in `.env` only, and don't name it in this repo.
 - Is Ollama installed, and does the machine run `llama3.2` well? Needed by 3.1.
 - Should the smee client run on the host or as a dev Compose service? Decide at 2.11.
 
@@ -119,3 +123,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Blueprint corrected, learning docs created, plan added. Next: step 0.1.
 - 2026-11-01: Added `.gitignore` and untracked `.idea/` (step 0.1). Next: step 0.2.
 - 2026-11-01: Verified the running stack: 3 tests passed and `/health` returned 200 (step 0.2). Found an unclosed Postgres connection, added to step 0.5. Next: step 0.3.
+- 2026-11-01: Untracked `CLAUDE.md`, audited the repo and history for personal data, and added the no-hardcoding rule with steps 0.9, 0.10, 2.13, and 4.10. Next: step 0.3.

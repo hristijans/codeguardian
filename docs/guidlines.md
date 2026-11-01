@@ -100,7 +100,7 @@ Unit 2: GitHub Event Ingestion & Asynchronous Task Queueing
 
 * Objective: Receive real GitHub pull request webhooks, verify them, and decouple them from background code review execution using RabbitMQ message publishing and Redis state caching.
 * Technology Stack: FastAPI, Pydantic v2, RabbitMQ (AMQP 0-9-1), Redis async client, httpx, GitHub REST API, smee.io (local webhook relay).
-* GitHub Connection: A fine-grained personal access token scoped to the owner's repositories (Pull requests: read & write, Contents: read) and one webhook per repository. Webhooks reach the local stack through a smee.io relay. Add GITHUB_TOKEN and GITHUB_WEBHOOK_SECRET to src/config.py and .env.example. The token sits behind a small client so a GitHub App can replace it later.
+* GitHub Connection: A fine-grained personal access token scoped to the owner's repositories (Pull requests: read & write, Contents: read) and one webhook per repository. Webhooks reach the local stack through a smee.io relay. Add GITHUB_TOKEN and GITHUB_WEBHOOK_SECRET to src/config.py and .env.example. The token sits behind a small client so a GitHub App can replace it later. The repositories to review come from the environment (REVIEW_REPOSITORIES), and later from the database. No repository name or link is ever hardcoded.
 * Components To Build:
   * src/schemas.py: Pydantic payload models (PRWebhookPayload, JobResponse, JobStatusDetails).
   * src/github.py: GitHub client that fetches the PR diff (GET /repos/{owner}/{repo}/pulls/{number} with Accept: application/vnd.github.diff). GitHub webhooks do not include the diff.
