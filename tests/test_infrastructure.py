@@ -128,3 +128,30 @@ def test_github_secrets_load_but_stay_out_of_printed_settings(
     assert loaded.GITHUB_WEBHOOK_SECRET.get_secret_value() == "example-webhook-value"
     assert "example-token-value" not in repr(loaded)
     assert "example-webhook-value" not in repr(loaded)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", set()),
+        ("  ", set()),
+        ("example-org/example-repo", {"example-org/example-repo"}),
+        (
+            " example-org/one , Example-Org/Two ,, ",
+            {"example-org/one", "example-org/two"},
+        ),
+    ],
+)
+def test_review_repositories_parses_comma_separated_text(
+    raw: str, expected: set, monkeypatch: pytest.MonkeyPatch
+):
+    # A real environment value, so a list-typed field that expects JSON fails.
+    monkeypatch.setenv("REVIEW_REPOSITORIES", raw)
+
+    assert Settings(_env_file=None).review_repositories == expected
+
+
+def test_review_repositories_defaults_to_none(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("REVIEW_REPOSITORIES", raising=False)
+
+    assert Settings(_env_file=None).review_repositories == set()

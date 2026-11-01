@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # GitHub
     GITHUB_TOKEN: SecretStr
     GITHUB_WEBHOOK_SECRET: SecretStr
+    # Comma-separated owner/name values. Empty means nothing is reviewed.
+    REVIEW_REPOSITORIES: str = ""
 
     # LLM
     LLM_PROVIDER: str = "ollama"
@@ -39,6 +41,15 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @property
+    def review_repositories(self) -> set[str]:
+        # Lowercased because GitHub treats repository names as case-insensitive.
+        return {
+            name.strip().lower()
+            for name in self.REVIEW_REPOSITORIES.split(",")
+            if name.strip()
+        }
 
     @property
     def postgres_dsn(self) -> str:

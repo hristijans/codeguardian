@@ -165,3 +165,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Consequence:** The Postgres and RabbitMQ passwords are still plain strings. They are local values, and they are built into connection URLs.
 
 **Implemented:** Yes.
+
+## D17: An empty repository allowlist reviews nothing (2026-11-01)
+
+**Decision:** `REVIEW_REPOSITORIES` defaults to empty, and empty means no repository is reviewed.
+
+**Why:** Each review sends code to an LLM, so a missing setting should leave the app idle.
+
+**Rejected:** Treating empty as "review everything", which is the riskier failure. Making the setting required, because the app can run safely without it. A `list[str]` field, because pydantic-settings reads it as JSON from the environment, and a comma-separated value is easier to write.
+
+**Implemented:** Yes.

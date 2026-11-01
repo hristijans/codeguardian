@@ -127,7 +127,11 @@ async def github_webhook(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid payload"
         ) from None
 
-    if payload.action not in REVIEWED_ACTIONS:
+    repository = payload.repository.full_name.lower()
+    if (
+        payload.action not in REVIEWED_ACTIONS
+        or repository not in settings.review_repositories
+    ):
         response.status_code = status.HTTP_200_OK
         return {"status": "ignored"}
 

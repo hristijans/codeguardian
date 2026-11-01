@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.13 Repository allowlist from env.** Unit 2 is under way.
+**Next step: 2.5 Redis job store `src/cache.py`.** Unit 2 is under way.
 
 ## How to use this plan
 
@@ -47,7 +47,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.2 | Payload and job schemas in `src/schemas.py` | Validation tests pass with a sample payload | ✅ |
 | 2.3 | Signature verification | Good signature passes and a bad one is rejected, checked over the raw body | ✅ |
 | 2.4 | Webhook route with event filtering | 202 for accepted actions, no job for others, `ping` handled | ✅ |
-| 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ⬜ |
+| 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ✅ |
 | 2.5 | Redis job store `src/cache.py` | Records save and read back with a 24-hour expiry | ⬜ |
 | 2.6 | Delivery deduplication | A repeated `X-GitHub-Delivery` creates no second job | ⬜ |
 | 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ⬜ |
@@ -135,3 +135,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Added webhook and job schemas with a placeholder sample event: 34 passed (step 2.2). Next: step 2.3.
 - 2026-11-01: Added `verify_signature` in `src/github.py`, tested with GitHub's documented example: 46 passed (step 2.3). Next: step 2.4.
 - 2026-11-01: Added the webhook route with signature check first, then event and action filtering: 65 passed, and checked against the running API (step 2.4). Accepted jobs aren't stored yet. Next: step 2.13.
+- 2026-11-01: Added the `REVIEW_REPOSITORIES` allowlist, with empty meaning nothing is reviewed: 73 passed (step 2.13). Next: step 2.5.

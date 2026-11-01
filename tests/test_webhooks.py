@@ -19,7 +19,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "pull_request_opened.json"
 @pytest.fixture(autouse=True)
 def webhook_secret(settings: Settings):
     app.dependency_overrides[get_settings] = lambda: settings.model_copy(
-        update={"GITHUB_WEBHOOK_SECRET": SecretStr(SECRET)}
+        update={
+            "GITHUB_WEBHOOK_SECRET": SecretStr(SECRET),
+            "REVIEW_REPOSITORIES": "example-org/example-repo",
+        }
     )
     yield
     app.dependency_overrides.clear()
@@ -183,3 +186,43 @@ async def test_signed_pull_request_with_a_bad_body_is_rejected(
 
     assert response.status_code == 422
     assert response.json() == {"detail": "Invalid payload"}
+
+
+@pytest.mark.asyncio
+async def test_repository_not_on_the_list_creates_no_job(
+    async_client: AsyncClient, raw_payload: dict
+):
+    raw_payload["repository"]["full_name"] = "example-org/another-repo"
+
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ignored"}
+
+
+@pytest.mark.asyncio
+async def test_repository_match_ignores_case(
+    async_client: AsyncClient, raw_payload: dict
+):
+    raw_payload["repository"]["full_name"] = "Example-Org/Example-Repo"
+
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+
+    assert response.status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_empty_list_reviews_nothing(
+    async_client: AsyncClient, raw_payload: dict, settings: Settings
+):
+    app.dependency_overrides[get_settings] = lambda: settings.model_copy(
+        update={
+            "GITHUB_WEBHOOK_SECRET": SecretStr(SECRET),
+            "REVIEW_REPOSITORIES": "",
+        }
+    )
+
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ignored"}
