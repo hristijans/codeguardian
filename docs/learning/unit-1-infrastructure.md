@@ -221,6 +221,10 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 
 **A secret that has been committed must be replaced.** Removing it later doesn't remove it from history, so the safe fix is to revoke it and issue a new one. This matters from Unit 2, when `.env` starts holding `GITHUB_TOKEN`.
 
+**A bad global git setting only breaks some commands.** An empty `gpg.format` stops `log` and `commit`, because they read gpg settings, while `status` and `diff` keep working. That made the problem look intermittent. A `-c gpg.format=...` override doesn't help, because git rejects the bad value while reading the file, before the override is applied.
+
+The workaround is a small local script, `.git/git-safe`, kept in `.git/` so it is never versioned and doesn't exist in a fresh clone. It takes the same arguments as `git`, for example `.git/git-safe log --oneline`. Each run writes a copy of the global config without the empty line to `.git/filtered-global-gitconfig`, then runs git with `GIT_CONFIG_GLOBAL` pointing at the copy. That variable applies to one process, much like prefixing a command with `APP_ENV=testing` in a shell. The copy stays inside `.git`, so it can't be committed even though it holds your name and email.
+
 ## Known limitations
 
 - **A new engine per check.** `check_postgres` builds an engine on every call, which is fine for a small health route but not for real database code. Unit 2 onward should share one engine.
@@ -228,6 +232,7 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 - **Errors are returned to the caller.** The health response includes `str(e)`, which can expose internal details on a public endpoint.
 - **Passwords aren't URL-encoded.** Characters such as `@` or `/` in a password would break the derived URLs.
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
+- **`.git/git-safe` only helps when you call it.** Plain `git log`, and any tool that runs plain git, still fails here. The filter also removes any empty `format =` line in the global config, not only the one under `[gpg]`, which is harmless because an empty value sets nothing useful.
 - **`DEBUG` is defined but not used** in the code so far.
 
 ## Verification record

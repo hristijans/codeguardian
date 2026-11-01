@@ -121,3 +121,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Consequence:** A fresh clone has no `CLAUDE.md`. The workflow rules stay available in `docs/PLAN.md`. Earlier versions remain in commits that have not been pushed.
 
 **Implemented:** Yes.
+
+## D13: Work around the global git config instead of editing it (2026-11-01)
+
+**Decision:** A local script, `.git/git-safe`, runs git against a filtered copy of the global config. Both stay in `.git/`, out of version control, because the problem belongs to one machine and not to the project.
+
+**Why:** The global file is shared with other projects, so a fix for this project mustn't change it.
+
+**Rejected:** Editing the global file, because it could affect other projects. A `-c` override, because git fails on the bad value before applying it. A repo-level setting, because the global file is still read and still fails. `direnv`, because it isn't installed and would add a dependency for one variable. A one-off copy, because it would drift from the global file. Keeping the script in the repo, because it only serves this machine.
+
+**Implemented:** Yes.

@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 0.7 Commit the Phase 0 work, after the user's go-ahead.** The Unit 1 gaps need closing before Unit 2 starts.
+**Next step: 0.9 Remove local dev credentials from code and Compose.** The Unit 1 gaps need closing before Unit 2 starts.
 
 ## How to use this plan
 
@@ -34,8 +34,8 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 0.4 | Check `pytest-asyncio` compatibility | `event_loop` fixture removed or confirmed safe, and the `asyncio_default_fixture_loop_scope` warning is gone | ✅ |
 | 0.5 | Fix engine cleanup in `check_postgres` | Cleanup also runs when the check fails, and pytest shows no unclosed connection `ResourceWarning` | ✅ |
 | 0.6 | First commit | History exists on `main` (made outside this plan, and includes `.idea/`) | ✅ |
-| 0.7 | Commit the Phase 0 work | Steps 0.1 to 0.5 are committed, after the user's go-ahead | ⬜ |
-| 0.8 | Fix empty `gpg.format` in `~/.gitconfig` | `git log` works without an override | ⬜ |
+| 0.7 | Commit the Phase 0 work | Steps 0.1 to 0.5 are committed, after the user's go-ahead | ✅ |
+| 0.8 | Work around empty `gpg.format` in the global git config, without editing it | `log` works through a local wrapper kept out of version control, and the global file is unchanged | ✅ |
 | 0.9 | Remove local dev credentials from code and Compose | `src/config.py` has no password defaults, Compose reads `.env`, and `.env.example` has placeholders | ⬜ |
 | 0.10 | Choose a commit email before pushing | Your decision on using GitHub's noreply address is made before the first push | ⬜ |
 
@@ -127,3 +127,5 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: `/health` test now enforces all services healthy, and a new test covers a failed service: 4 passed, and the strict test fails against a broken Redis (step 0.3). Next: step 0.4.
 - 2026-11-01: Removed the unused `event_loop` fixture, added `pytest.ini`, and raised the `pytest-asyncio` minimum to 1.0.0: 4 passed, loop-scope warning gone (step 0.4). Next: step 0.5.
 - 2026-11-01: Moved `engine.dispose()` into a `finally` outside the session block, with two leak tests that failed first: 6 passed, no `ResourceWarning` (step 0.5). Next: step 0.7.
+- 2026-11-01: Steps 0.1 to 0.5 were already in history, with 0.5 committed by the user, so step 0.7 is marked done. Step 0.8 is still open: it edits a file outside the repo and needs the user. Next: step 0.8.
+- 2026-11-01: Added a local `git-safe` wrapper, kept in `.git/` and out of version control, so `log` and `commit` work here without editing the global git config, which other projects share (step 0.8). Next: step 0.9.
