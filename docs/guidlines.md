@@ -94,7 +94,7 @@ Unit 1: Infrastructure Blueprint & Service Containerization
   * src/config.py: Strongly-typed configuration class deriving DSNs (postgres_dsn, redis_url, rabbitmq_url).
   * src/main.py: FastAPI application with concurrent health checks using asyncio.gather().
   * tests/conftest.py & tests/test_infrastructure.py: Asynchronous Pytest harness validating API status and database readiness.
-* Testable Milestone: Health check integration test verifying http://localhost:8000/health returns HTTP 200 with all 3 infrastructure services reported healthy, and pytest passing 3 tests.
+* Testable Milestone: Health check integration test verifying http://localhost:8000/health returns HTTP 200 with all 3 infrastructure services reported healthy, and pytest passing.
 
 Unit 2: GitHub Event Ingestion & Asynchronous Task Queueing
 
@@ -223,7 +223,7 @@ Unit 6: Production CI/CD Pipeline, Observability & Agent Evaluation
 4. Comprehensive Unit Comparison Matrix
 
 Unit	Core Objective	Key Technologies Introduced	Primary Artifact Created	Verification Method
-Unit 1	Infrastructure Setup	Docker Compose, FastAPI, Pydantic, SQLAlchemy, pytest	docker-compose.yml, config.py, main.py	docker compose exec api pytest (3 passing tests)
+Unit 1	Infrastructure Setup	Docker Compose, FastAPI, Pydantic, SQLAlchemy, pytest	docker-compose.yml, config.py, main.py	docker compose exec api pytest
 Unit 2	GitHub Ingestion & Event Queue	RabbitMQ (aio-pika), Redis (aioredis), signed GitHub webhooks, smee.io	schemas.py, github.py, queue.py, cache.py, worker.py	docker compose exec api pytest + real PR event through smee.io
 Unit 3	Single-Agent LangGraph	LangGraph (StateGraph), Ollama (swappable provider), Pydantic	src/agent/state.py, src/agent/graph.py	Pytest graph execution against diffs with mocked LLM
 Unit 4	Multi-Agent & Checkpointing	LangGraph Multi-Agent, Postgres AsyncPostgresSaver, psycopg 3, Alembic	src/agent/router.py, src/agent/checkpoint.py	Postgres checkpoint verification & thread resumption tests

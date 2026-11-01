@@ -1,6 +1,7 @@
 import pytest
 from httpx import AsyncClient
-from src.config import Settings
+from src.config import Settings, get_settings
+from src.main import app
 
 
 @pytest.mark.asyncio
@@ -23,10 +24,31 @@ async def test_settings_loading(settings: Settings):
 @pytest.mark.asyncio
 async def test_health_check_endpoint(async_client: AsyncClient):
     response = await async_client.get("/health")
-    assert response.status_code in (200, 503)
+    assert response.status_code == 200
     data = response.json()
-    assert "status" in data
-    assert "services" in data
-    assert "postgres" in data["services"]
-    assert "redis" in data["services"]
-    assert "rabbitmq" in data["services"]
+    assert data["status"] == "healthy"
+    assert data["services"]["postgres"]["status"] == "healthy"
+    assert data["services"]["redis"]["status"] == "healthy"
+    assert data["services"]["rabbitmq"]["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_health_check_reports_failed_service(
+    async_client: AsyncClient, settings: Settings
+):
+    # Nothing listens on port 1, so the Redis check fails straight away.
+    broken_settings = settings.model_copy(
+        update={"REDIS_HOST": "localhost", "REDIS_PORT": 1}
+    )
+    app.dependency_overrides[get_settings] = lambda: broken_settings
+    try:
+        response = await async_client.get("/health")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "unhealthy"
+    assert data["services"]["redis"]["status"] == "unhealthy"
+    assert data["services"]["postgres"]["status"] == "healthy"
+    assert data["services"]["rabbitmq"]["status"] == "healthy"

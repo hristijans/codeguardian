@@ -152,7 +152,40 @@ async def async_client():
 
 - `test_root_endpoint`: checks that `/` responds as expected.
 - `test_settings_loading`: checks the app name and the format of the derived URLs.
-- `test_health_check_endpoint`: checks that `/health` has the expected response shape.
+- `test_health_check_endpoint`: requires 200 with all three services healthy.
+- `test_health_check_reports_failed_service`: breaks Redis on purpose and requires 503, with Redis unhealthy and the other two still healthy.
+
+`test_health_check_endpoint` talks to the real services, so it only passes inside the Compose network. A failure outside Docker is expected.
+
+### Replacing a dependency in a test
+
+```python
+broken_settings = settings.model_copy(
+    update={"REDIS_HOST": "localhost", "REDIS_PORT": 1}
+)
+app.dependency_overrides[get_settings] = lambda: broken_settings
+try:
+    response = await async_client.get("/health")
+finally:
+    app.dependency_overrides.clear()
+```
+
+`model_copy(update=...)` returns a changed copy, so the cached `Settings` object stays intact for other tests. This matters because `lru_cache` shares that one object.
+
+`dependency_overrides` tells FastAPI to call a replacement whenever a route asks for `Depends(get_settings)`. It is similar to `$this->app->instance()` or `$this->mock()` in a Laravel test. The `try/finally` always clears the override, even if the request raises an error, so it can't affect later tests.
+
+Port 1 has nothing listening, so the connection is refused immediately and the test stays fast.
+
+### Why a test needs to be able to fail
+
+The old test accepted 200 or 503, so it passed even during an outage. A test that can't fail gives false confidence. To prove the new test can fail, run it with broken settings:
+
+```bash
+docker compose exec -T -e REDIS_HOST=localhost -e REDIS_PORT=1 api \
+  python -m pytest tests/test_infrastructure.py::test_health_check_endpoint
+```
+
+The `-e` flags set environment variables for that one command, which take priority over everything else in `Settings`. The test then fails with `assert 503 == 200`, which shows it detects an outage.
 
 ## Git ignore rules: `.gitignore`
 
@@ -172,7 +205,6 @@ Git applies these patterns in order, and a later match wins. `.env.*` ignores va
 
 ## Known limitations
 
-- **The health test can't detect an outage.** It accepts 200 or 503, so it passes when services are down, including when tests run outside Docker where hosts like `postgres` don't resolve. It does not yet enforce the Unit 1 milestone.
 - **A new engine per check.** `check_postgres` builds an engine on every call, which is fine for a small health route but not for real database code. Unit 2 onward should share one engine. It also only disposes the engine on success, so a failed check skips the cleanup.
 - **An unclosed Postgres connection.** The verified test run prints a `ResourceWarning` for an unclosed asyncpg connection. The likely cause is that `engine.dispose()` runs inside the `async with` block, while the session is still holding its connection. Moving cleanup outside the block is step 0.5, which will confirm this.
 - **Errors are returned to the caller.** The health response includes `str(e)`, which can expose internal details on a public endpoint.
@@ -187,7 +219,7 @@ Checked on 2026-11-01 against the running Compose stack:
 
 - `docker compose ps`: `postgres`, `redis`, and `rabbitmq` were healthy, and `api` was up. `api` has no health check of its own.
 - `GET /health`: returned 200 with all three services healthy.
-- `docker compose exec -T api python -m pytest -v`: 3 passed.
+- `docker compose exec -T api python -m pytest -v`: 3 passed at first, and 4 passed after step 0.3 tightened the health tests.
 
 Versions installed: Python 3.12.16, pytest 9.2.0, pytest-asyncio 1.4.1.post1, FastAPI 0.162.0, SQLAlchemy 2.1.6, Pydantic 2.14.2, redis 8.1.0, aio-pika 10.2.1.
 
