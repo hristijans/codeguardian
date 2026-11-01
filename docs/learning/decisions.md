@@ -141,3 +141,15 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Keeping development defaults, because they are the problem this step removes. Generating new passwords for the local `.env`, because Postgres only reads its password when the volume is created, so this would mean deleting the data or changing the password by hand for no gain on local throwaway values.
 
 **Implemented:** Yes.
+
+## D15: Use the owner's own email for commits (2026-11-01)
+
+**Decision:** Commits use the owner's own email address, not GitHub's noreply address.
+
+**Why:** It was the owner's choice, made before the first push.
+
+**Rejected:** GitHub's noreply address, which keeps the real address out of public commit metadata.
+
+**Consequence:** Once pushed, the address is visible in the commit metadata of this repository. This is the one place it appears: it stays out of files, as the no-personal-data rule requires.
+
+**Implemented:** Yes.

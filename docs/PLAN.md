@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 0.10 Choose a commit email before pushing.** The Unit 1 gaps need closing before Unit 2 starts.
+**Next step: 2.1 Add `GITHUB_TOKEN` and `GITHUB_WEBHOOK_SECRET` to config and `.env.example`.** Phase 0 is finished, once its uncommitted changes are committed.
 
 ## How to use this plan
 
@@ -37,7 +37,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 0.7 | Commit the Phase 0 work | Steps 0.1 to 0.5 are committed, after the user's go-ahead | ✅ |
 | 0.8 | Work around empty `gpg.format` in the global git config, without editing it | `log` works through a local wrapper kept out of version control, and the global file is unchanged | ✅ |
 | 0.9 | Remove local dev credentials from code and Compose | `src/config.py` has no password defaults, Compose reads `.env`, `.env.example` has placeholders, and `.dockerignore` keeps `.env` out of images | ✅ |
-| 0.10 | Choose a commit email before pushing | Your decision on using GitHub's noreply address is made before the first push | ⬜ |
+| 0.10 | Choose a commit email before pushing | Your decision on using GitHub's noreply address is made before the first push | ✅ |
 
 ## Unit 2: GitHub ingestion and queue
 
@@ -130,3 +130,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Steps 0.1 to 0.5 were already in history, with 0.5 committed by the user, so step 0.7 is marked done. Step 0.8 is still open: it edits a file outside the repo and needs the user. Next: step 0.8.
 - 2026-11-01: Added a local `git-safe` wrapper, kept in `.git/` and out of version control, so `log` and `commit` work here without editing the global git config, which other projects share (step 0.8). Next: step 0.9.
 - 2026-11-01: Removed credential defaults, moved Compose to `.env`, and added `.dockerignore`: 10 passed, `/health` 200 (step 0.9). Next: step 0.10.
+- 2026-11-01: Chose the owner's own email for commits instead of GitHub's noreply address (step 0.10). Next: step 2.1.
