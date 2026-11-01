@@ -1,0 +1,49 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "id": 1000001,
+    "number": 42,
+    "state": "open",
+    "draft": false,
+    "title": "Add login form",
+    "body": "Example pull request body.",
+    "html_url": "https://github.com/example-org/example-repo/pull/42",
+    "diff_url": "https://github.com/example-org/example-repo/pull/42.diff",
+    "user": {
+      "login": "example-user",
+      "id": 1001,
+      "type": "User"
+    },
+    "head": {
+      "label": "example-org:feature/login",
+      "ref": "feature/login",
+      "sha": "0000000000000000000000000000000000000abc"
+    },
+    "base": {
+      "label": "example-org:main",
+      "ref": "main",
+      "sha": "0000000000000000000000000000000000000def"
+    },
+    "additions": 10,
+    "deletions": 2,
+    "changed_files": 1
+  },
+  "repository": {
+    "id": 2000001,
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "private": false,
+    "default_branch": "main",
+    "owner": {
+      "login": "example-org",
+      "id": 1002,
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "example-user",
+    "id": 1001,
+    "type": "User"
+  }
+}

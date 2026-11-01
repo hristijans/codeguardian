@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.2 Payload and job schemas in `src/schemas.py`.** Unit 2 is under way.
+**Next step: 2.3 Signature verification.** Unit 2 is under way.
 
 ## How to use this plan
 
@@ -44,7 +44,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | ID | Step | Done when | Status |
 |---|---|---|---|
 | 2.1 | Add `GITHUB_TOKEN` and `GITHUB_WEBHOOK_SECRET` to config and `.env.example` | Settings load, and secrets stay out of git | ✅ |
-| 2.2 | Payload and job schemas in `src/schemas.py` | Validation tests pass with a sample payload | ⬜ |
+| 2.2 | Payload and job schemas in `src/schemas.py` | Validation tests pass with a sample payload | ✅ |
 | 2.3 | Signature verification | Good signature passes and a bad one is rejected, checked over the raw body | ⬜ |
 | 2.4 | Webhook route with event filtering | 202 for accepted actions, no job for others, `ping` handled | ⬜ |
 | 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ⬜ |
@@ -132,3 +132,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Removed credential defaults, moved Compose to `.env`, and added `.dockerignore`: 10 passed, `/health` 200 (step 0.9). Next: step 0.10.
 - 2026-11-01: Chose the owner's own email for commits instead of GitHub's noreply address (step 0.10). Next: step 2.1.
 - 2026-11-01: Added required `SecretStr` settings for the GitHub token and webhook secret: 13 passed (step 2.1). The local `.env` holds placeholders until real values are needed. Next: step 2.2.
+- 2026-11-01: Added webhook and job schemas with a placeholder sample event: 34 passed (step 2.2). Next: step 2.3.
