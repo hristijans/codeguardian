@@ -163,5 +163,5 @@ async def async_client():
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
 - **`DEBUG` is defined but not used** in the code so far.
 - **The `event_loop` fixture may break on upgrades.** Overriding it is deprecated in newer `pytest-asyncio` releases. This has not been checked against the installed version.
-- **No `.gitignore` yet.** `.env` could be committed by accident.
+- **No `.gitignore` yet.** `.env` could be committed by accident, and `.idea/` is already tracked.
 - **Tests were not run while writing these notes.** The explanations come from reading the code.

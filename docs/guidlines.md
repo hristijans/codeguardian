@@ -74,7 +74,7 @@ Testing Harness	PHPUnit / Pest PHP	pytest + pytest-asyncio + httpx	Fixture-based
 
 3. Curriculum Units & Implementation Roadmap
 
-The course is structured into 6 sequential, testable units designed to build the pipeline iteratively from foundational infrastructure to production-grade deployment.
+The course is structured into 6 sequential, testable units designed to build the pipeline iteratively from foundational infrastructure to production-grade deployment. Current status and the next step are tracked only in docs/PLAN.md.
 
 ┌───────────────────────────────────────────────────────────────────────────────────┐
 │                               CURRICULUM ROADMAP                                  │
@@ -82,23 +82,21 @@ The course is structured into 6 sequential, testable units designed to build the
 │    UNIT 1    │    UNIT 2    │    UNIT 3    │    UNIT 4    │    UNIT 5    │   UNIT 6   │
 │ Infrastructure│ Event Queue │ LangGraph 101│ Multi-Agent  │ HITL & SSE   │ CI/CD & Eval│
 │   Setup      │ Ingestion    │ Single-Agent │ Checkpoints  │ Streaming    │ Deployment │
-│  [COMPLETED] │ [NEXT UP]    │              │              │              │            │
 └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┴────────────┘
 
 
-Unit 1: Infrastructure Blueprint & Service Containerization (Status: COMPLETED ✅)
+Unit 1: Infrastructure Blueprint & Service Containerization
 
 * Objective: Build a containerized local environment running all supporting data services with automated integration health checks.
 * Technology Stack: Docker, Docker Compose, Python 3.12, FastAPI, Pydantic v2, pydantic-settings, SQLAlchemy 2.0 (async), asyncpg, redis-py (async), aio-pika, pytest, pytest-asyncio.
-* Core Components Implemented:
+* Core Components:
   * docker-compose.yml: Multi-container orchestration for api, postgres, redis, and rabbitmq with health checks (pg_isready, redis-cli ping, rabbitmq-diagnostics).
   * src/config.py: Strongly-typed configuration class deriving DSNs (postgres_dsn, redis_url, rabbitmq_url).
   * src/main.py: FastAPI application with concurrent health checks using asyncio.gather().
   * tests/conftest.py & tests/test_infrastructure.py: Asynchronous Pytest harness validating API status and database readiness.
 * Testable Milestone: Health check integration test verifying http://localhost:8000/health returns HTTP 200 with all 3 infrastructure services reported healthy, and pytest passing 3 tests.
-* Known Gap: tests/test_infrastructure.py currently accepts HTTP 503 from /health, so the suite does not yet enforce the "all services healthy" milestone.
 
-Unit 2: GitHub Event Ingestion & Asynchronous Task Queueing (Status: NEXT UP 🚀)
+Unit 2: GitHub Event Ingestion & Asynchronous Task Queueing
 
 * Objective: Receive real GitHub pull request webhooks, verify them, and decouple them from background code review execution using RabbitMQ message publishing and Redis state caching.
 * Technology Stack: FastAPI, Pydantic v2, RabbitMQ (AMQP 0-9-1), Redis async client, httpx, GitHub REST API, smee.io (local webhook relay).
@@ -234,4 +232,4 @@ Unit 6	Production CI/CD & Eval	GitHub Actions, LangSmith / OpenTelemetry, Docker
 
 5. Next Steps
 
-With Unit 1 built, the next step is Unit 2: GitHub Event Ingestion & Asynchronous Task Queueing. Before starting it, add a .gitignore, make the first commit, and tighten the /health test so it enforces the Unit 1 milestone. Unit 3 follows once the worker exists, replacing its simulated processing with real AI code review logic.
+See docs/PLAN.md for current status, the next step, and the full list of tasks.
