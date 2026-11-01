@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 0.1 Add `.gitignore` and stop tracking `.idea/`.** Unit 1 needs verifying before Unit 2 starts.
+**Next step: 0.2 Run the stack and tests.** Unit 1 needs verifying before Unit 2 starts.
 
 ## How to use this plan
 
@@ -28,7 +28,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 
 | ID | Step | Done when | Status |
 |---|---|---|---|
-| 0.1 | Add `.gitignore` and stop tracking `.idea/` | `.env`, caches, and `.idea/` are ignored, and `.idea/` is removed from the index | ⬜ |
+| 0.1 | Add `.gitignore` and stop tracking `.idea/` | `.env`, caches, and `.idea/` are ignored, and `.idea/` is removed from the index | ✅ |
 | 0.2 | Run the stack and tests | Compose services are healthy, and the pytest result is recorded | 🔍 |
 | 0.3 | Make the `/health` test enforce the milestone | Test requires 200 with all services healthy inside Compose | ⬜ |
 | 0.4 | Check `pytest-asyncio` compatibility | `event_loop` fixture removed or confirmed safe | ⬜ |
@@ -117,3 +117,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 ## Session log
 
 - 2026-11-01: Blueprint corrected, learning docs created, plan added. Next: step 0.1.
+- 2026-11-01: Added `.gitignore` and untracked `.idea/` (step 0.1). Next: step 0.2.

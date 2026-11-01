@@ -154,6 +154,22 @@ async def async_client():
 - `test_settings_loading`: checks the app name and the format of the derived URLs.
 - `test_health_check_endpoint`: checks that `/health` has the expected response shape.
 
+## Git ignore rules: `.gitignore`
+
+`.gitignore` lists files Git should leave untracked. Here that means secrets, generated caches, virtual environments, and IDE settings.
+
+```gitignore
+.env
+.env.*
+!.env.example
+```
+
+Git applies these patterns in order, and a later match wins. `.env.*` ignores variants such as `.env.production`, and the `!` adds `.env.example` back, so the template stays in the repo while real secrets don't. This is the same convention as a Laravel project's `.env` and `.env.example`.
+
+**`.gitignore` only affects untracked files.** A file that is already committed stays tracked even if it matches a pattern. That is why `.idea/` also needed `git rm -r --cached .idea`. The `--cached` flag removes files from Git's index and keeps them on disk, so the IDE settings still work. They do remain in earlier commits.
+
+**A secret that has been committed must be replaced.** Removing it later doesn't remove it from history, so the safe fix is to revoke it and issue a new one. This matters from Unit 2, when `.env` starts holding `GITHUB_TOKEN`.
+
 ## Known limitations
 
 - **The health test can't detect an outage.** It accepts 200 or 503, so it passes when services are down, including when tests run outside Docker where hosts like `postgres` don't resolve. It does not yet enforce the Unit 1 milestone.
@@ -163,5 +179,4 @@ async def async_client():
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
 - **`DEBUG` is defined but not used** in the code so far.
 - **The `event_loop` fixture may break on upgrades.** Overriding it is deprecated in newer `pytest-asyncio` releases. This has not been checked against the installed version.
-- **No `.gitignore` yet.** `.env` could be committed by accident, and `.idea/` is already tracked.
 - **Tests were not run while writing these notes.** The explanations come from reading the code.

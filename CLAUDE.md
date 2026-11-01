@@ -14,6 +14,7 @@ The primary goal of this project is learning. The owner comes from PHP/Laravel a
 4. Add work that isn't in the plan as a new step before doing it.
 5. If the plan and the code disagree, trust the code and correct the plan.
 6. Keep "Current focus" accurate, and add one line to the session log at the end of each working session.
+7. When a step is finished, give the user a short commit message for it. Don't commit unless asked.
 
 Only `docs/PLAN.md` tracks status. Don't record it in other documents.
 
