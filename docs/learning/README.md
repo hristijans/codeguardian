@@ -11,6 +11,7 @@ This folder is the long-term reference for everything built in CodeGuardian: wha
 | [decisions.md](decisions.md) | Why the project went one way and not another |
 | [libraries.md](libraries.md) | Why a library is used and what it does |
 | [unit-1-infrastructure.md](unit-1-infrastructure.md) | How the Docker setup, config, health checks, and tests work |
+| [unit-2-github-ingestion.md](unit-2-github-ingestion.md) | How GitHub events reach the app and become jobs |
 
 ## How these notes are maintained
 

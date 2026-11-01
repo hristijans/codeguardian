@@ -153,3 +153,15 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Consequence:** Once pushed, the address is visible in the commit metadata of this repository. This is the one place it appears: it stays out of files, as the no-personal-data rule requires.
 
 **Implemented:** Yes.
+
+## D16: Type GitHub secrets as `SecretStr` (2026-11-01)
+
+**Decision:** `GITHUB_TOKEN` and `GITHUB_WEBHOOK_SECRET` are required `SecretStr` fields.
+
+**Why:** A plain string prints in full wherever the settings object is shown, and a failing test printed the whole object during step 0.9. A GitHub token is a live credential, so it is hidden by default and code has to ask for it on purpose.
+
+**Rejected:** Plain `str`, for that reason. Making them optional until the live test, because the app would start and only fail once a webhook arrived.
+
+**Consequence:** The Postgres and RabbitMQ passwords are still plain strings. They are local values, and they are built into connection URLs.
+
+**Implemented:** Yes.

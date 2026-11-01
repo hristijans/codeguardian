@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,10 @@ class Settings(BaseSettings):
     RABBITMQ_PORT: int = 5672
     RABBITMQ_USER: str
     RABBITMQ_PASSWORD: str
+
+    # GitHub
+    GITHUB_TOKEN: SecretStr
+    GITHUB_WEBHOOK_SECRET: SecretStr
 
     # LLM
     LLM_PROVIDER: str = "ollama"

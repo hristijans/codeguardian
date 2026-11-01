@@ -97,7 +97,14 @@ async def test_check_postgres_closes_connection_when_query_fails(
 
 @pytest.mark.parametrize(
     "credential",
-    ["POSTGRES_USER", "POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD"],
+    [
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "RABBITMQ_USER",
+        "RABBITMQ_PASSWORD",
+        "GITHUB_TOKEN",
+        "GITHUB_WEBHOOK_SECRET",
+    ],
 )
 def test_settings_refuse_to_load_without_credential(
     credential: str, monkeypatch: pytest.MonkeyPatch
@@ -107,3 +114,17 @@ def test_settings_refuse_to_load_without_credential(
     # _env_file=None ignores .env, so only the code's own defaults could fill it.
     with pytest.raises(ValidationError, match=credential):
         Settings(_env_file=None)
+
+
+def test_github_secrets_load_but_stay_out_of_printed_settings(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "example-token-value")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "example-webhook-value")
+
+    loaded = Settings(_env_file=None)
+
+    assert loaded.GITHUB_TOKEN.get_secret_value() == "example-token-value"
+    assert loaded.GITHUB_WEBHOOK_SECRET.get_secret_value() == "example-webhook-value"
+    assert "example-token-value" not in repr(loaded)
+    assert "example-webhook-value" not in repr(loaded)
