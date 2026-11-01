@@ -2,7 +2,7 @@
 
 Unit 1 starts Postgres, Redis, RabbitMQ, and a FastAPI service with one command, then reports whether the API can reach all three.
 
-**Files:** `docker-compose.yml`, `Dockerfile`, `.env.example`, `src/config.py`, `src/main.py`, `tests/conftest.py`, `tests/test_infrastructure.py`
+**Files:** `docker-compose.yml`, `Dockerfile`, `.dockerignore`, `.env.example`, `src/config.py`, `src/main.py`, `tests/conftest.py`, `tests/test_infrastructure.py`
 
 ## How a health check flows
 
@@ -29,6 +29,14 @@ It defines four services: `api`, `postgres`, `redis`, and `rabbitmq`.
 
 **Ports.** `"5432:5432"` means host port, then container port. These mappings let tools on your machine connect. Containers talk to each other over the shared network without them. Port `15672` is the RabbitMQ management web UI.
 
+**Credentials come from `.env`.** Compose reads `.env` in two separate ways, and the file uses both:
+- `env_file: .env` on `api` passes every key into that container, which is where `Settings` reads them.
+- `${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}` on `postgres` and `rabbitmq` is substitution: Compose fills the value into the YAML before starting anything. The `:?` makes a missing value a hard error, so the stack refuses to start rather than running with an empty password.
+
+The Postgres health check writes `$${POSTGRES_USER}`. The doubled `$` tells Compose to leave it alone, so the shell inside the container expands it.
+
+**A password in `.env` doesn't change an existing database.** Postgres only reads `POSTGRES_PASSWORD` when it first creates its data volume. Changing the value later leaves the stored password as it was, and the API then fails to log in. Either change the password inside Postgres, or delete the volume with `docker compose down -v`, which also deletes the data.
+
 **`command`.** This overrides the Dockerfile's `CMD`, so development adds `--reload` while the image default stays without it.
 
 ### `Dockerfile`
@@ -48,6 +56,10 @@ COPY . .
 
 **`build-essential`:** Provides compilers in case a dependency has to build native code during install.
 
+### `.dockerignore`
+
+`COPY . .` copies everything Docker is sent, and `.gitignore` has no effect on it, so ignoring a file in Git doesn't keep it out of an image. `.dockerignore` does that job. It keeps out `.env`, `.git/`, and local files, because anything copied into an image stays in that image's layers and travels with it. It doesn't affect the `.:/app` mount, so in development the container can still see `.env` on disk.
+
 ## Configuration: `src/config.py`
 
 ```python
@@ -55,13 +67,15 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
 ```
 
-Each field is a typed setting with a default. Values are read in this order, highest priority first:
+Most fields are typed settings with a default. Values are read in this order, highest priority first:
 
-1. Real environment variables, such as those set in `docker-compose.yml`
+1. Real environment variables, such as those Compose passes in from `.env`
 2. The `.env` file
 3. The default in the class
 
 `extra="ignore"` means unknown keys in `.env` are skipped instead of raising an error.
+
+The Postgres and RabbitMQ usernames and passwords have no default on purpose. A field written as `POSTGRES_PASSWORD: str`, with nothing after it, is required, so `Settings()` raises a `ValidationError` naming the missing field. In Laravel terms, `env('DB_PASSWORD', 'secret')` becomes `env('DB_PASSWORD')` plus a check that it is set. The app stops at startup instead of quietly connecting with a value from source code.
 
 ### Derived URLs
 
@@ -233,6 +247,8 @@ The workaround is a small local script, `.git/git-safe`, kept in `.git/` so it i
 - **Passwords aren't URL-encoded.** Characters such as `@` or `/` in a password would break the derived URLs.
 - **`sessionmaker` is the older style.** SQLAlchemy 2.0 also offers `async_sessionmaker`, which is the typed choice for async code.
 - **`.git/git-safe` only helps when you call it.** Plain `git log`, and any tool that runs plain git, still fails here. The filter also removes any empty `format =` line in the global config, not only the one under `[gpg]`, which is harmless because an empty value sets nothing useful.
+- **Old commits still contain the dev passwords.** Earlier commits include `secret` and `guest`. They are local development values and were never real secrets. The local `.env` keeps those same values because the existing volumes were created with them.
+- **A fresh setup from `.env.example` hasn't been run.** The file parses with Compose, but starting from empty volumes was not tried, because that means deleting the current data.
 - **`DEBUG` is defined but not used** in the code so far.
 
 ## Verification record
@@ -243,6 +259,9 @@ Checked on 2026-11-01 against the running Compose stack:
 - `GET /health`: returned 200 with all three services healthy.
 - `docker compose exec -T api python -m pytest -v`: 3 passed at first, and 4 passed after step 0.3 tightened the health tests. After step 0.5 added two leak tests, 6 passed.
 - `docker compose exec -T api python -X dev -m pytest -q -W default`: before step 0.5 this printed `ResourceWarning` lines for unclosed asyncpg connections. After it, 6 passed with no warnings. The two leak tests failed first and passed once the fix was in, which confirmed the cause.
+- Step 0.9, after recreating the stack from `.env`: 10 passed with no warnings, and `/health` returned 200. The four credential tests failed first against the old defaults.
+- `docker compose --env-file /dev/null config -q` refused to run and named the missing variables.
+- Listing `/app` in a freshly built image showed no `.env` and no `.git`.
 
 Versions installed: Python 3.12.16, pytest 9.2.0, pytest-asyncio 1.4.1.post1, FastAPI 0.162.0, SQLAlchemy 2.1.6, Pydantic 2.14.2, redis 8.1.0, aio-pika 10.2.1.
 

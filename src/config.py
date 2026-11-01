@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     # Postgres
     POSTGRES_SERVER: str = "postgres"
     POSTGRES_PORT: int = 5432
-    POSTGRES_USER: str = "codeguardian"
-    POSTGRES_PASSWORD: str = "secret"
+    POSTGRES_USER: str
+    POSTGRES_PASSWORD: str
     POSTGRES_DB: str = "codeguardian_db"
 
     # Redis
@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     # RabbitMQ
     RABBITMQ_HOST: str = "rabbitmq"
     RABBITMQ_PORT: int = 5672
-    RABBITMQ_USER: str = "guest"
-    RABBITMQ_PASSWORD: str = "guest"
+    RABBITMQ_USER: str
+    RABBITMQ_PASSWORD: str
 
     # LLM
     LLM_PROVIDER: str = "ollama"

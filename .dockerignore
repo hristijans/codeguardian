@@ -1,0 +1,17 @@
+# Secrets and local machine files must never reach an image
+.env
+.env.*
+!.env.example
+.git/
+.idea/
+.vscode/
+CLAUDE.md
+
+# Generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/

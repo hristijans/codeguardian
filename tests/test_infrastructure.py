@@ -3,6 +3,7 @@ import warnings
 
 import pytest
 from httpx import AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import text
 from src import main
 from src.config import Settings, get_settings
@@ -92,3 +93,17 @@ async def test_check_postgres_closes_connection_when_query_fails(
     assert result["status"] == "unhealthy"
     assert "no_such_table" in result["error"]
     assert leaks == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    ["POSTGRES_USER", "POSTGRES_PASSWORD", "RABBITMQ_USER", "RABBITMQ_PASSWORD"],
+)
+def test_settings_refuse_to_load_without_credential(
+    credential: str, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv(credential, raising=False)
+
+    # _env_file=None ignores .env, so only the code's own defaults could fill it.
+    with pytest.raises(ValidationError, match=credential):
+        Settings(_env_file=None)

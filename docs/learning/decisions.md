@@ -131,3 +131,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Editing the global file, because it could affect other projects. A `-c` override, because git fails on the bad value before applying it. A repo-level setting, because the global file is still read and still fails. `direnv`, because it isn't installed and would add a dependency for one variable. A one-off copy, because it would drift from the global file. Keeping the script in the repo, because it only serves this machine.
 
 **Implemented:** Yes.
+
+## D14: Require credentials from `.env` (2026-11-01)
+
+**Decision:** Usernames and passwords have no defaults in `src/config.py`, and Compose takes them from `.env`. A missing value stops startup.
+
+**Why:** A default in source code is a committed credential, and it hides a missing setting by connecting anyway.
+
+**Rejected:** Keeping development defaults, because they are the problem this step removes. Generating new passwords for the local `.env`, because Postgres only reads its password when the volume is created, so this would mean deleting the data or changing the password by hand for no gain on local throwaway values.
+
+**Implemented:** Yes.

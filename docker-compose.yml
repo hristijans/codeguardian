@@ -6,17 +6,8 @@ services:
     container_name: codeguardian_api
     ports:
       - "8000:8000"
-    environment:
-      - APP_ENV=development
-      - POSTGRES_SERVER=postgres
-      - POSTGRES_USER=codeguardian
-      - POSTGRES_PASSWORD=secret
-      - POSTGRES_DB=codeguardian_db
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_USER=guest
-      - RABBITMQ_PASSWORD=guest
+    env_file:
+      - .env
     volumes:
       - .:/app
     depends_on:
@@ -32,15 +23,15 @@ services:
     image: postgres:16-alpine
     container_name: codeguardian_postgres
     environment:
-      POSTGRES_USER: codeguardian
-      POSTGRES_PASSWORD: secret
-      POSTGRES_DB: codeguardian_db
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U codeguardian -d codeguardian_db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -63,8 +54,8 @@ services:
       - "5672:5672"
       - "15672:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
