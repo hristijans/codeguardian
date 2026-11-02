@@ -246,3 +246,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Whether real GitHub payloads survive the relay is checked in step 2.11.
 
+## D25: Reach host Ollama through `host-gateway`, and use `llama3.2` (2026-11-02)
+
+**Decision:** Ollama keeps running on the host. The `api` and `worker` services map `host.docker.internal` to `host-gateway`, Ollama listens on `0.0.0.0:11434` through a systemd drop-in, and the model is `llama3.2` (3B). Connection checks live in `tests/test_ollama.py` under an `ollama` marker.
+
+**Why:** Ollama on the host keeps its models across container rebuilds and is already installed. `host-gateway` is Docker's own way to give a Linux container the host's address, and it matches what Docker Desktop does by default. The 3B model ran a review-sized reply in under a minute on this CPU, where the 7B one would take several. The marker lets CI skip checks that need a local model.
+
+**Rejected:** An `ollama` service in Compose, which would duplicate the models on disk, keep them in a volume, and need GPU passthrough set up if a GPU is ever used. `network_mode: host`, which removes the container's network isolation and breaks the service names (`redis`, `rabbitmq`) the app uses. Binding Ollama to the bridge address `172.17.0.1` only, which keeps it off the local network but breaks `ollama` and `localhost:11434` on the host unless every shell sets `OLLAMA_HOST`. `llama3.2:1b`, which is faster but weaker at following structured-output instructions. `mistral`, which is about 2.5 times slower here. Checking Ollama in `/health`, which would make the API report unhealthy whenever the LLM is down, though webhooks still work.
+
+**Implemented:** Yes. The local-network exposure is a known limitation, not yet fixed.
+

@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 3.1 Ollama access from containers and chosen model.** Unit 2 is complete: signed webhooks become jobs, a worker fetches each diff and records the outcome, an end-to-end test covers the whole path, and a live PR event through smee.io worked. The review is still simulated. Unit 3 replaces it with a LangGraph agent, starting with reaching Ollama from inside the containers. Open question for 3.1: is Ollama installed, and does the machine run `llama3.2` well?
+**Next step: 3.2 LLM factory `src/agent/llm.py`.** Unit 3 is under way. The containers reach Ollama on the host through `host.docker.internal`, and `llama3.2` (3B) answers in about a minute for a review-sized reply. Step 0.11 was added: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
 
 ## How to use this plan
 
@@ -38,6 +38,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 0.8 | Work around empty `gpg.format` in the global git config, without editing it | `log` works through a local wrapper kept out of version control, and the global file is unchanged | ✅ |
 | 0.9 | Remove local dev credentials from code and Compose | `src/config.py` has no password defaults, Compose reads `.env`, `.env.example` has placeholders, and `.dockerignore` keeps `.env` out of images | ✅ |
 | 0.10 | Choose a commit email before pushing | Your decision on using GitHub's noreply address is made before the first push | ✅ |
+| 0.11 | Keep local services off the network | Compose publishes Postgres, Redis, and RabbitMQ on `127.0.0.1` only, and Ollama's port is limited to Docker's networks by a firewall rule the owner applies | ⬜ |
 
 ## Unit 2: GitHub ingestion and queue
 
@@ -62,7 +63,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 
 | ID | Step | Done when | Status |
 |---|---|---|---|
-| 3.1 | Ollama access from containers (`extra_hosts`) and chosen model | A test prompt gets a reply from inside a container | ⬜ |
+| 3.1 | Ollama access from containers (`extra_hosts`) and chosen model | A test prompt gets a reply from inside a container | ✅ |
 | 3.2 | LLM factory `src/agent/llm.py` | Nodes get a model only through `LLM_PROVIDER` | ⬜ |
 | 3.3 | State and report schemas | State has reducers, and `CodeAuditReport` validates | ⬜ |
 | 3.4 | `analyze_diff_node` with mocked-LLM tests | SQL injection and clean diffs give the right structured output | ⬜ |
@@ -116,7 +117,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 ## Open questions
 
 - ~~Which repository should be the first live test?~~ Chosen by the owner 2026-11-02 and set in `.env` only.
-- Is Ollama installed, and does the machine run `llama3.2` well? Needed by 3.1.
+- ~~Is Ollama installed, and does the machine run `llama3.2` well?~~ Answered 2026-11-02: yes, CPU only, about 6 tokens/s for the 3B model (D25).
 - ~~Should the smee client run on the host or as a dev Compose service?~~ Decided 2026-11-02: a Compose service under the `live` profile (D24).
 
 ## Session log
@@ -146,3 +147,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-02: Added the `smee` relay as a Compose service under the `live` profile (D24). Reading smee-client's source showed it rebuilds the JSON body, and a probe through a throwaway channel confirmed compact JSON keeps its signature (200) while `\u003c`-style escapes lose it (401). Step 2.11 is blocked until the owner sets up the token, secret, channel, and webhook. Next: step 2.11 live run.
 - 2026-11-02: Live test through smee.io passed (step 2.11): a real PR open gave 202 and a completed job with its diff fetched, an edit with `<`, `>`, `&`, and non-ASCII in the title passed the signature check through the relay, and a redelivery from GitHub was deduplicated, confirming the delivery ID is reused. Next: step 2.12.
 - 2026-11-02: Added the end-to-end test from signed webhook through the worker to `completed`, the Unit 2 milestone: 151 passed, two deliberate breaks caught (step 2.14). Reread and tidied the Unit 2 notes: added a flow overview and file table and fixed future-tense lines from earlier steps (step 2.12). Unit 2 is done. Next: step 3.1.
+- 2026-11-02: Containers reach host Ollama through `extra_hosts: host-gateway`, with Ollama listening on all interfaces through a systemd drop-in, and `llama3.2` chosen: the new Ollama tests failed first on name resolution, then 4 passed, and a review-sized prompt from the worker took 54 seconds at 6 tokens/s (step 3.1). Added step 0.11 for the local-network exposure this showed. Next: step 3.2.

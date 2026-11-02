@@ -17,6 +17,11 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    # Docker Desktop defines host.docker.internal, but Docker on Linux doesn't.
+    # `host-gateway` maps it to the host's address on the Docker bridge, so
+    # the container can reach Ollama running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:
@@ -35,6 +40,11 @@ services:
         condition: service_healthy
     # No --reload here: after changing the code, run
     # `docker compose restart worker`.
+    # Docker Desktop defines host.docker.internal, but Docker on Linux doesn't.
+    # `host-gateway` maps it to the host's address on the Docker bridge, so
+    # the container can reach Ollama running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: python -m src.worker
     restart: unless-stopped
 
