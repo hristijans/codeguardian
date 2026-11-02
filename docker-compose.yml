@@ -38,6 +38,28 @@ services:
     command: python -m src.worker
     restart: unless-stopped
 
+  # Relays GitHub webhooks from a smee.io channel to the API, for local
+  # testing only. It is in the `live` profile, so it starts only with
+  # `docker compose --profile live up -d smee`.
+  smee:
+    image: node:22-alpine
+    container_name: codeguardian_smee
+    profiles: ["live"]
+    env_file:
+      - .env
+    depends_on:
+      - api
+    # `$$` reaches the shell as `$`, so the variable is read from the
+    # container's environment and not interpolated by Compose, which would
+    # fail every Compose command for anyone without SMEE_URL set.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        test -n "$$SMEE_URL" || { echo "Set SMEE_URL in .env"; exit 1; };
+        exec npx --yes smee-client@5.0.0
+        --url "$$SMEE_URL"
+        --target http://api:8000/api/v1/webhooks/github/pr
+
   postgres:
     image: postgres:16-alpine
     container_name: codeguardian_postgres

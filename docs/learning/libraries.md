@@ -111,3 +111,18 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 **Why it is used:** pytest cannot await a coroutine by itself. Without this plugin, an async test would not run properly. The project needs version 1.0 or newer, and sets its loop scope in `pytest.ini`.
 
 **Laravel equivalent:** None, because normal PHP code does not have this async model.
+
+## Development tools
+
+### smee-client
+
+**What it does:** Connects to a smee.io channel and posts every webhook it receives again to a local URL.
+
+**Why it is used:** GitHub can't post to `localhost`. The relay needs no account, opens no port on the machine, and is the tool GitHub's own webhook guides suggest. It runs only in the `smee` Compose service under the `live` profile, pinned to 5.0.0, through `npx`. It isn't a Python dependency and isn't in `requirements.txt`.
+
+**Alternatives:** ngrok or Cloudflare Tunnel, which expose the local port itself and forward the exact bytes, so signatures always survive. Both need an account or a binary, and expose more than webhooks. GitHub CLI's `gh webhook forward` extension, which needs the `gh` CLI and an admin login. Posting signed test payloads by hand, which the tests already do but which proves nothing about real GitHub events.
+
+**Caveat:** It rebuilds the request body with `JSON.stringify`, so it doesn't forward GitHub's bytes exactly (see the Unit 2 notes).
+
+**Laravel equivalent:** None built in. Laravel developers usually reach for Expose or ngrok.
+

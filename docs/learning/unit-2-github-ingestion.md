@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`, `src/worker.py`, `tests/test_worker.py`, `docker-compose.yml`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`, `src/worker.py`, `tests/test_worker.py`, `docker-compose.yml`, `.env.example`
 
 ## GitHub settings
 
@@ -212,7 +212,7 @@ class JobStore:
 
 ## Delivery deduplication
 
-Every webhook carries an `X-GitHub-Delivery` header, an ID that is unique to each delivery. GitHub's docs say a redelivery, sent by hand from the webhook settings or through the API, reuses the original ID. That hasn't been checked against real GitHub yet, and step 2.11 will confirm it. GitHub doesn't retry failed deliveries on its own.
+Every webhook carries an `X-GitHub-Delivery` header, an ID that is unique to each delivery. GitHub's docs say a redelivery, sent by hand from the webhook settings or through the API, reuses the original ID. Step 2.11 confirmed it: a redelivery from the webhook settings came back as a 200 `duplicate`, and Redis still held one job and one claim. GitHub doesn't retry failed deliveries on its own.
 
 Without deduplication, each redelivery would create a second job and a second review of the same event. The route prevents that by claiming the delivery ID before it saves the job.
 
@@ -574,13 +574,72 @@ It uses the same Dockerfile as the API with a different command, like running Ho
 - **`handle_message`** uses `FakeIncoming`, a small stand-in for an aio-pika message that records each `ack` and `reject`. That shows exactly what the broker would be told, which a real broker can't easily show. One test checks the job's status at the moment of the ack, to prove the ack comes after the final save.
 - **`start_consuming`** runs once against the real RabbitMQ: a message published to a test queue is consumed and the job completed. Then the connection is closed, which would put an unacked message back, and the queue is checked to be empty. That test waits for the handler to finish, not just for the `completed` status, because the ack comes a moment after the save.
 
+## Live webhooks through smee.io
+
+GitHub can't reach `localhost`, so a relay carries its webhooks in. [smee.io](https://smee.io) gives out a public channel URL. GitHub posts each event to that URL, and `smee-client`, running locally, holds a connection open to the channel and posts each event again to the API.
+
+```text
+GitHub ──POST──▶ smee.io channel ──server-sent events──▶ smee-client ──POST──▶ api:8000/api/v1/webhooks/github/pr
+```
+
+The client keeps an outgoing connection open and the events come back over it, so nothing on the machine has to accept incoming connections. That's the same trick as ngrok or Expose (from the Laravel world), but with less setup and nothing to install, because smee.io only relays webhooks.
+
+### The `smee` Compose service
+
+```yaml
+smee:
+  image: node:22-alpine
+  profiles: ["live"]
+  env_file: [.env]
+  entrypoint: ["sh", "-c"]
+  command:
+    - >-
+      test -n "$$SMEE_URL" || { echo "Set SMEE_URL in .env"; exit 1; };
+      exec npx --yes smee-client@5.0.0 --url "$$SMEE_URL"
+      --target http://api:8000/api/v1/webhooks/github/pr
+```
+
+**`profiles: ["live"]`** keeps it out of a plain `docker compose up`. It runs only when asked for: `docker compose --profile live up -d smee`. The relay is only for testing with real events, and the tests don't need it.
+
+**`$$SMEE_URL`, not `${SMEE_URL}`.** Compose replaces `${...}` in the whole file before it does anything, even for services that aren't started. A required `${SMEE_URL:?...}` would break every Compose command for anyone who hasn't set it. `$$` is Compose's escape for a literal `$`, so the shell inside the container reads the variable from the `env_file` instead, and the `test -n` gives a clear message when it's empty.
+
+**`--target http://api:8000/...`** uses the service name, because inside the Compose network the API is `api`, not `localhost`.
+
+**`exec`** replaces the shell with the client, so the client receives Docker's SIGTERM directly (see the worker's signal handling above).
+
+**The version is pinned** (`smee-client@5.0.0`), so a new release can't change the relay without anyone noticing. `npx --yes` downloads it the first time the container is created.
+
+### The relay rewrites the body
+
+Reading `smee-client`'s source before using it showed this: it doesn't forward GitHub's bytes. smee.io parses the JSON it receives, and the client rebuilds the body with `JSON.stringify(data.body)`. The signature check runs over the exact bytes (see "Signature verification"), so an event passes only if GitHub's JSON is byte-for-byte what `JSON.stringify` would write: no spaces, the same escapes, the same number formats.
+
+A probe through a throwaway channel, with the placeholder fixture signed with the local secret, showed both outcomes:
+
+| Body sent to smee.io | API answer |
+|---|---|
+| Compact JSON, as `JSON.stringify` writes it | 200, so the signature survived |
+| The same with `<`, `>`, `&` written as `<`, `>`, `&` | 401, because the relay unescaped them |
+
+Some JSON encoders write those three characters as escapes, to make JSON safe inside HTML. If GitHub's did, an event containing one of them would fail with a 401 through smee, even though GitHub signed it correctly. Step 2.11 checked this: a real `edited` event for a PR titled with `<`, `>`, `&`, and a non-ASCII letter passed the signature check through smee (200). So GitHub's encoder doesn't escape them, and its compact JSON matches what `JSON.stringify` writes, at least for these characters. Other differences, such as number formats, remain possible. In production GitHub posts to the API directly, and the bytes arrive untouched.
+
+### Running the live test
+
+The token, secret, channel, and repository live only in `.env`, never in the repository.
+
+1. Create a channel at https://smee.io/new, and put its URL in `SMEE_URL`.
+2. Create a fine-grained token limited to the test repository, with Pull requests read and write and Contents read, and put it in `GITHUB_TOKEN`. Reading is all this step needs. The write permission is for Unit 5.
+3. Generate a random secret, for example with `python -c "import secrets; print(secrets.token_hex(32))"`, and put it in `GITHUB_WEBHOOK_SECRET`.
+4. Put the repository's `owner/name` in `REVIEW_REPOSITORIES`.
+5. In the repository's settings, add a webhook: the payload URL is the smee channel, the content type is **`application/json`** (the route can't parse the form-encoded default), the secret is the same value, and the events are **Pull requests** only.
+6. `docker compose up -d --force-recreate api worker`, because settings are read only at startup and `env_file` is read only when a container is created. Then `docker compose --profile live up -d smee`.
+7. Open a PR, or push to one, and follow `docker compose logs -f smee api worker`.
+
 ## Known limitations
 
-- **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
 - **A broker outage fails deliveries.** While RabbitMQ is down or reconnecting, about 12.5 seconds for a restart in testing, every accepted delivery fails with a 500, and GitHub doesn't retry on its own. Each one has to be redelivered by hand. Retrying the publish, or saving messages to send later (the outbox pattern), would fix this, and neither is planned yet.
 - **A second failure can leave a stuck job.** If marking a job `failed` after a failed publish itself fails, for example because Redis also went down, the job stays `queued` with no message, the claim isn't released, and the new error replaces the original one.
 - **The module name `queue.py` matches the standard library's `queue`.** `src.queue` is safe as long as code is run as part of the `src` package, for example `python -m src.worker`. Running a file inside `src/` directly would put `src/` on the import path, and `import queue` anywhere, including inside the standard library, would then find this file.
-- **The local allowlist is empty.** `REVIEW_REPOSITORIES` is `""` in the local `.env`, so every event is ignored until a real repository is added for step 2.11.
+- **A fresh clone starts with placeholders.** `.env.example` holds `change-me` values and an example repository, so a stack started from it can't fetch diffs, and anyone reaching the route could sign with the public `change-me` secret until a real one is set.
 - **The allowlist only reads from the environment.** Step 4.10 adds the database as a source.
 - **A misspelled name fails silently.** The event is ignored with a 200, and nothing warns that the value doesn't match a real repository.
 - **A valid request can be replayed.** The signature covers only the body, not the headers or a timestamp, so a captured request stays valid. Deduplication catches an exact copy for 24 hours, but the `X-GitHub-Delivery` header isn't signed, so a replay with a new ID gets through. It handles redeliveries, not attacks.
@@ -590,19 +649,23 @@ It uses the same Dockerfile as the API with a different command, like running Ho
 - **One retry, then dropped.** An unexpected error is retried once. A Redis restart longer than one retry still loses the job, and with Redis down the job can't even be marked `failed`, so it keeps its last status. A dead-letter queue would keep dropped messages for inspection, and none is configured.
 - **A requeued message is retried straight away.** There is no delay between the first attempt and the retry, so a brief outage can easily outlast it.
 - **Stopping the worker cuts off a running job.** It isn't lost, because the message wasn't acked, but its work is done again by the next worker.
+- **smee re-serialises webhook bodies.** The local relay rebuilds the JSON. Real events with `<`, `>`, `&`, and non-ASCII text passed in step 2.11, but a payload that GitHub formats differently from `JSON.stringify` in some other way would fail the signature check. It only affects local testing. See "The relay rewrites the body".
+- **A ping before the relay starts is lost.** The smee client doesn't replay events sent while it wasn't connected, so start the relay before adding the webhook, or redeliver from GitHub.
+- **smee.io channels are public.** Anyone with the channel URL can watch the events going through it, including PR titles and repository names. Use a private channel URL, keep it in `.env`, and treat it like a password.
 - **No worker health check.** Compose only knows whether the process is running, not whether it is still consuming.
 - **Anyone who can reach the API can read any job.** The jobs route has no authentication. Job IDs are random UUIDs, so they're hard to guess, but a record shows the repository, PR number, and title. Fine for a local stack, not for a public one.
 - **A corrupt record gives a 500.** If a stored record no longer fits `JobStatusDetails`, for example after a field is added later without a default, `store.get` raises and the route fails instead of returning a 404.
 - **The diff can be newer than the job.** `fetch_diff` returns the pull request as it is when called, and that endpoint can't be asked for a specific commit. If a new commit is pushed between the webhook and the fetch, the job's `head_sha` and the diff won't match. The newer push sends its own `synchronize` event, so that commit gets a job too.
 - **No rate-limit handling.** A 403 or 429 from GitHub's rate limit is reported like any other error, without waiting for the reset time.
 - **Very large diffs are untested.** GitHub returns an error instead of a diff for pull requests over its size limits. The client would raise `GitHubError` with that status, but the exact limits and status code haven't been checked. Step 3.5 deals with diff size.
-- **The token is still a placeholder.** The client has only been run against real GitHub with a fake token. A real fetch waits for step 2.11.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
 - **Saves can overwrite each other.** `save` replaces the whole record, so if two writers load, change, and save the same job, the later save wins and the earlier change is lost. Only the worker changes a job after it is created, so this isn't expected to happen yet.
 - **Redis isn't durable storage.** If Redis restarts without persistence, or a job is older than 24 hours, the record is gone. Lasting results belong in Postgres, which Units 3 and 4 add.
 - **Only the GitHub secrets are hidden.** The Postgres and RabbitMQ passwords are still plain strings, so they still print with the settings object.
 
 ## Verification record
+
+Step 2.11, on 2026-11-02, against a real repository named only in `.env`: the API and worker were recreated with a fine-grained token, a generated 64-character webhook secret, the repository in the allowlist, and a smee channel, and the `smee` service was started. The owner then made three events on a test PR. Opening it gave a 202, and the worker fetched a 10-line diff with a 200 from GitHub and marked the job `completed` within a second. Editing the title to include `<`, `>`, `&`, and a non-ASCII letter gave a 200 (`edited` is ignored after the signature check), so the signature survived the relay. Redelivering the `opened` event from GitHub's webhook settings gave a 200, and Redis held one job and one delivery claim, so the redelivery reused the delivery ID. The title's characters were confirmed by reading the PR through the API with the token, printing only which characters it contained. The first `ping` was lost, because the webhook was added before the relay started.
 
 Step 2.10, on 2026-11-02: 150 passed. The new tests failed first, because `src/worker.py` didn't exist. Eleven deliberate breaks were tried, and all were caught in the end and then reverted: acking before processing, not saving `processing`, not skipping finished jobs, always requeueing, never acking, requeueing an unreadable message, keeping an old error, never giving up, giving up on the first failure, and a give-up step that raises. One break, catching every exception inside `process_job`, passed the first set of tests. It showed that a bug during the fetch would leave a dropped job stuck in `processing`, so `_give_up` and `test_dropped_job_is_marked_failed` were added, and the break was then caught. Live checks against the Compose stack: the `worker` service started and logged `Waiting for jobs on pr_analysis_queue`. A job saved in Redis and published to the real queue went `queued`, `processing`, `failed`, with the error `GitHub returned 401 for example-org/example-repo#1`, because the token is a placeholder. The queue then held 0 messages with 1 consumer. `docker compose stop worker` took 0.5 seconds with exit code 0, and the worker logged `Stopping`. The live job was deleted, and no `job:*` or `delivery:*` keys were left.
 

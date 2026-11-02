@@ -235,3 +235,14 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Acking on arrival (`no_ack`), which loses the job if the worker stops. Requeueing every failure, which loops a broken message endlessly. Counting attempts in Redis or in a message header, which allows more retries but needs state that `redelivered` gives for free. A quorum queue's delivery count, which would mean deleting and redeclaring the queue (see D20's notes on queue settings). A dead-letter exchange, which is the better home for dropped messages but isn't needed until there is something to inspect them with. aio-pika's `message.process(requeue=True, reject_on_redelivered=True)`, which does the same in one line but hides the rules and leaves no place to mark the job `failed` before the reject. No prefetch limit, which lets one worker grab every waiting message.
 
 **Implemented:** Yes.
+
+## D24: Run the smee relay as a Compose service under a profile (2026-11-02)
+
+**Decision:** The relay is a `smee` service in `docker-compose.yml`, using `node:22-alpine` and `npx --yes smee-client@5.0.0`, in the `live` profile, reading `SMEE_URL` from `.env` inside the container and posting to `http://api:8000/api/v1/webhooks/github/pr`.
+
+**Why:** The command is written down and repeatable, nothing needs installing on the host, and the profile keeps it out of the normal stack and the tests. Reading the URL inside the container keeps Compose working for anyone without `SMEE_URL`.
+
+**Rejected:** Running `npx smee-client` on the host, which works but leaves the command only in the docs and needs Node on the host. ngrok or Cloudflare Tunnel, which keep the exact body bytes but need an account or a binary. A custom image with smee-client installed, which saves the download on first start but is one more thing to build. Weakening the signature check to accept re-serialised JSON, which would undo the reason for checking the raw bytes.
+
+**Implemented:** Yes. Whether real GitHub payloads survive the relay is checked in step 2.11.
+

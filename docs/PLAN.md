@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.11 Live test through smee.io.** Unit 2 is under way. Accepted jobs are saved, deduplicated, published to RabbitMQ, and consumed by the `worker` Compose service, which fetches the diff and marks the job `completed` or `failed`. The review is still simulated, and nothing has run against a real repository yet.
+**Next step: 2.12 Learning notes `unit-2-*.md`.** Unit 2 works end to end: a real PR event through smee.io created a job, the worker fetched its diff and completed it, a redelivery was deduplicated, and special characters survived the relay. What's left is reviewing the Unit 2 notes as a whole.
 
 ## How to use this plan
 
@@ -54,7 +54,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.8 | `GET /api/v1/jobs/{job_id}` | Returns a job, and 404 when unknown | ✅ |
 | 2.9 | GitHub client `src/github.py` | Diff fetch works against a mocked API | ✅ |
 | 2.10 | Worker `src/worker.py` plus Compose service | Job moves queued → processing → completed or failed, with ack after processing | ✅ |
-| 2.11 | Live test through smee.io | A real PR event creates a job and the diff is fetched | ⬜ |
+| 2.11 | Live test through smee.io | A real PR event creates a job and the diff is fetched | ✅ |
 | 2.12 | Learning notes `unit-2-*.md` | Notes, libraries, and decisions are updated | ⬜ |
 
 ## Unit 3: Single-agent LangGraph
@@ -114,9 +114,9 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 
 ## Open questions
 
-- Which repository should be the first live test? Needed by 2.11. Set it in `.env` only, and don't name it in this repo.
+- ~~Which repository should be the first live test?~~ Chosen by the owner 2026-11-02 and set in `.env` only.
 - Is Ollama installed, and does the machine run `llama3.2` well? Needed by 3.1.
-- Should the smee client run on the host or as a dev Compose service? Decide at 2.11.
+- ~~Should the smee client run on the host or as a dev Compose service?~~ Decided 2026-11-02: a Compose service under the `live` profile (D24).
 
 ## Session log
 
@@ -142,3 +142,5 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-02: Added `GET /api/v1/jobs/{job_id}`, with a UUID path type so malformed IDs get a 422: 109 passed, four deliberate breaks caught, and checked against the running API (step 2.8). Next: step 2.9.
 - 2026-11-02: Added `GitHubClient` with `fetch_diff`, tested through `httpx.MockTransport`: 131 passed, seven of eight deliberate breaks caught (the uncaught one changes no behaviour), and a live call with a fake token gave a clean 401 `GitHubError` (step 2.9). Next: step 2.10.
 - 2026-11-02: Added the worker in `src/worker.py` and its Compose service, acking only after the final status is saved and retrying unexpected errors once: 150 passed, eleven deliberate breaks caught (one only after adding the give-up step), and a live job went queued → processing → failed with the placeholder token (step 2.10). Next: step 2.11.
+- 2026-11-02: Added the `smee` relay as a Compose service under the `live` profile (D24). Reading smee-client's source showed it rebuilds the JSON body, and a probe through a throwaway channel confirmed compact JSON keeps its signature (200) while `\u003c`-style escapes lose it (401). Step 2.11 is blocked until the owner sets up the token, secret, channel, and webhook. Next: step 2.11 live run.
+- 2026-11-02: Live test through smee.io passed (step 2.11): a real PR open gave 202 and a completed job with its diff fetched, an edit with `<`, `>`, `&`, and non-ASCII in the title passed the signature check through the relay, and a redelivery from GitHub was deduplicated, confirming the delivery ID is reused. Next: step 2.12.
