@@ -14,15 +14,30 @@ import aio_pika
 from src.cache import JobStore
 from src.config import Settings, get_settings
 from src.github import verify_signature
-from src.schemas import JobResponse, JobStatus, JobStatusDetails, PRWebhookPayload
+from src.queue import JobPublisher, declare_queue
+from src.schemas import (
+    JobResponse,
+    JobStatus,
+    JobStatusDetails,
+    PRWebhookPayload,
+    ReviewJobMessage,
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Code before `yield` runs once at startup, and code after it at shutdown.
     # One shared client keeps a pool of connections, instead of each request
     # opening its own. Creating it doesn't connect yet.
-    app.state.redis = aioredis.from_url(get_settings().redis_url)
+    settings = get_settings()
+    app.state.redis = aioredis.from_url(settings.redis_url)
+    # Unlike Redis, this connects now, so the API won't start without
+    # RabbitMQ. `connect_robust` reconnects on its own if the link drops later.
+    app.state.rabbitmq = await aio_pika.connect_robust(settings.rabbitmq_url)
+    app.state.rabbitmq_channel = await app.state.rabbitmq.channel()
+    # A message sent before its queue exists is dropped, so declare it first.
+    await declare_queue(app.state.rabbitmq_channel)
     yield
+    await app.state.rabbitmq.close()
     await app.state.redis.aclose()
 
 
@@ -38,6 +53,10 @@ REVIEWED_ACTIONS = {"opened", "reopened", "synchronize"}
 
 def get_job_store(request: Request) -> JobStore:
     return JobStore(request.app.state.redis)
+
+
+def get_job_publisher(request: Request) -> JobPublisher:
+    return JobPublisher(request.app.state.rabbitmq_channel)
 
 
 async def check_postgres(settings: Settings) -> Dict[str, Any]:
@@ -125,6 +144,7 @@ async def github_webhook(
     x_github_delivery: Optional[str] = Header(default=None),
     settings: Settings = Depends(get_settings),
     store: JobStore = Depends(get_job_store),
+    publisher: JobPublisher = Depends(get_job_publisher),
 ) -> Union[JobResponse, Dict[str, str]]:
     # The body is read by hand because a Pydantic parameter would parse it
     # before the signature check, and the check needs the exact bytes.
@@ -187,5 +207,29 @@ async def github_webhook(
         await store.release_delivery(x_github_delivery)
         raise
 
-    # The job isn't queued yet. Step 2.7 publishes it to RabbitMQ here.
+    # Saved before publishing, so the worker never receives a job that has no
+    # record yet.
+    try:
+        await publisher.publish(
+            ReviewJobMessage(
+                job_id=job.job_id,
+                repo_name=job.repo_name,
+                pr_number=job.pr_number,
+                head_sha=job.head_sha,
+            )
+        )
+    except Exception as error:
+        # A "queued" job with no message would wait forever, so record the
+        # failure. Releasing the claim lets a redelivery create a new job.
+        failed = job.model_copy(
+            update={
+                "status": JobStatus.FAILED,
+                "error": f"Could not queue the job: {type(error).__name__}",
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        await store.save(failed)
+        await store.release_delivery(x_github_delivery)
+        raise
+
     return JobResponse(job_id=job_id, status=JobStatus.QUEUED)

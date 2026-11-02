@@ -12,8 +12,9 @@ from pydantic import SecretStr
 
 from src.cache import JobStore, delivery_key, job_key
 from src.config import Settings, get_settings
-from src.main import app, get_job_store
-from src.schemas import JobStatus
+from src.main import app, get_job_publisher, get_job_store
+from src.queue import JobPublisher, PublishError
+from src.schemas import JobStatus, ReviewJobMessage
 
 URL = "/api/v1/webhooks/github/pr"
 SECRET = "example-webhook-secret"
@@ -47,6 +48,23 @@ async def store(redis_client) -> AsyncIterator[JobStore]:
         if job_id is not None:
             await redis_client.delete(job_key(job_id.decode()))
         await redis_client.delete(key)
+
+
+@pytest.fixture(autouse=True)
+def publisher(rabbit_channel, test_queue) -> JobPublisher:
+    """Send the route's messages to this test's own queue."""
+    publisher = JobPublisher(rabbit_channel, test_queue.name)
+    app.dependency_overrides[get_job_publisher] = lambda: publisher
+    return publisher
+
+
+async def drain(queue) -> list[ReviewJobMessage]:
+    """Take every message off a queue and return them in order."""
+    messages = []
+    while (message := await queue.get(fail=False)) is not None:
+        await message.ack()
+        messages.append(ReviewJobMessage.model_validate_json(message.body))
+    return messages
 
 
 @pytest.fixture
@@ -354,3 +372,75 @@ async def test_failed_save_releases_the_claim(
         )
 
     assert await redis_client.exists(delivery_key(delivery)) == 0
+
+
+@pytest.mark.asyncio
+async def test_accepted_job_is_published(
+    async_client: AsyncClient, raw_payload: dict, test_queue
+):
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+
+    assert await drain(test_queue) == [
+        ReviewJobMessage(
+            job_id=response.json()["job_id"],
+            repo_name=raw_payload["repository"]["full_name"],
+            pr_number=raw_payload["pull_request"]["number"],
+            head_sha=raw_payload["pull_request"]["head"]["sha"],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_repeated_delivery_publishes_once(
+    async_client: AsyncClient, raw_payload: dict, test_queue
+):
+    body = json.dumps(raw_payload).encode()
+    delivery = f"test-{uuid.uuid4()}"
+
+    await deliver(async_client, body, delivery=delivery)
+    await deliver(async_client, body, delivery=delivery)
+
+    assert len(await drain(test_queue)) == 1
+
+
+@pytest.mark.asyncio
+async def test_ignored_event_publishes_nothing(
+    async_client: AsyncClient, raw_payload: dict, test_queue
+):
+    raw_payload["action"] = "closed"
+
+    await deliver(async_client, json.dumps(raw_payload).encode())
+
+    assert await drain(test_queue) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_marks_the_job_failed_and_releases_the_claim(
+    async_client: AsyncClient, raw_payload: dict, redis_client, rabbit_channel,
+    store: JobStore,
+):
+    # A job left as "queued" with no message would never be picked up, and a
+    # leftover claim would turn the redelivery into a duplicate.
+    app.dependency_overrides[get_job_publisher] = lambda: JobPublisher(
+        rabbit_channel, "test-queue-that-does-not-exist"
+    )
+    delivery = f"test-{uuid.uuid4()}"
+    before = {key async for key in redis_client.scan_iter(match="job:*")}
+
+    with pytest.raises(PublishError):
+        await deliver(
+            async_client, json.dumps(raw_payload).encode(), delivery=delivery
+        )
+
+    assert await redis_client.exists(delivery_key(delivery)) == 0
+    new_keys = {key async for key in redis_client.scan_iter(match="job:*")} - before
+    assert len(new_keys) == 1
+    job_id = new_keys.pop().decode().removeprefix("job:")
+    job = await store.get(job_id)
+    try:
+        assert job.status == JobStatus.FAILED
+        assert job.error
+        assert job.updated_at >= job.created_at
+    finally:
+        # The released claim no longer points here, so the fixture can't.
+        await redis_client.delete(job_key(job_id))

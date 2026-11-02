@@ -195,3 +195,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Checking with `GET` and then setting, which leaves a race between the two commands. `SET NX` followed by a separate `GET`, which has a smaller race if the claim expires between them. Deduplicating on the head commit SHA, which would also skip legitimate new events for the same commit and is a different question from "have I seen this delivery?". Storing the claim inside the job record, which can't be looked up by delivery ID. Returning 202 or 409 for a repeat: 202 says new work was accepted, and 409 would show the redelivery as failed in GitHub's log.
 
 **Implemented:** Yes.
+
+## D20: Publish a self-contained message and require a broker ack (2026-11-02)
+
+**Decision:** The route saves the job, then publishes a `ReviewJobMessage` (job ID, repository, PR number, head SHA) as a persistent JSON message to the durable `pr_analysis_queue` through the default exchange. Anything but a `Basic.Ack` raises `PublishError`. A failed publish marks the job `failed` and releases the delivery claim.
+
+**Why:** The message carries what the worker needs to fetch the diff, so a missing Redis record doesn't strand it. With confirms on, an unroutable message comes back without an error, so only an explicit ack proves the broker took it. Saving first means the worker never sees a job without a record.
+
+**Rejected:** Sending only the job ID, which ties the worker to Redis, which isn't durable. Sending the whole `JobStatusDetails`, whose status and timestamps go stale. Publishing before saving, which lets a fast worker find no record. Ignoring the publish result, which loses jobs silently. Retrying the publish or an outbox table, which would survive broker outages but is more than this step needs; it's recorded as a known limitation. A named exchange, which only matters once a message must reach several queues.
+
+**Implemented:** Yes.

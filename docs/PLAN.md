@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.7 RabbitMQ publisher `src/queue.py`.** Unit 2 is under way. Accepted jobs are saved in Redis and deduplicated, but not yet queued.
+**Next step: 2.8 `GET /api/v1/jobs/{job_id}`.** Unit 2 is under way. Accepted jobs are saved, deduplicated, and published to RabbitMQ, and nothing consumes them yet.
 
 ## How to use this plan
 
@@ -50,7 +50,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ✅ |
 | 2.5 | Redis job store `src/cache.py` | Records save and read back with a 24-hour expiry | ✅ |
 | 2.6 | Delivery deduplication | A repeated `X-GitHub-Delivery` creates no second job | ✅ |
-| 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ⬜ |
+| 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ✅ |
 | 2.8 | `GET /api/v1/jobs/{job_id}` | Returns a job, and 404 when unknown | ⬜ |
 | 2.9 | GitHub client `src/github.py` | Diff fetch works against a mocked API | ⬜ |
 | 2.10 | Worker `src/worker.py` plus Compose service | Job moves queued → processing → completed or failed, with ack after processing | ⬜ |
@@ -138,3 +138,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Added the `REVIEW_REPOSITORIES` allowlist, with empty meaning nothing is reviewed: 73 passed (step 2.13). Next: step 2.5.
 - 2026-11-02: Added the Redis job store in `src/cache.py`, with one JSON record per job and a 24-hour expiry set in the same command: 80 passed, and five deliberate breaks were caught (step 2.5). The route doesn't save jobs yet. Next: step 2.6.
 - 2026-11-02: The webhook route now saves accepted jobs and claims each delivery ID with one `SET NX GET`, so a repeat returns the original job: 92 passed, seven deliberate breaks caught, and the lifespan checked against a temporary server (step 2.6). GitHub reusing the ID on redelivery is still to be confirmed at 2.11. Next: step 2.7.
+- 2026-11-02: Added the RabbitMQ publisher in `src/queue.py`, with a durable queue, persistent messages, and a required broker ack, and the route now publishes each job: 101 passed, six deliberate breaks caught, persistence proven across a broker restart, and recovery after about 12.5 seconds measured (step 2.7). Also found and deleted fixture jobs leaked by step 2.6's break runs. Next: step 2.8.

@@ -53,3 +53,16 @@ class JobStatusDetails(BaseModel):
     created_at: datetime
     updated_at: datetime
     error: Optional[str] = None
+
+
+class ReviewJobMessage(BaseModel):
+    """What the API sends to the worker through RabbitMQ.
+
+    It holds everything needed to fetch the diff, so the worker doesn't depend
+    on the Redis record still existing. Job status lives in Redis, not here.
+    """
+
+    job_id: str
+    repo_name: str
+    pr_number: int
+    head_sha: str

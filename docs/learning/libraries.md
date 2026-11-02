@@ -80,6 +80,10 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **Laravel equivalent:** Laravel queues hide most of this. With aio-pika you handle the queue, the message, and the acknowledgement yourself, which is part of the learning value.
 
+**Where it is used:** The `/health` check, and `src/queue.py`, which declares the durable queue and publishes persistent messages. The app shares one robust connection and channel, created in the FastAPI lifespan. Channels have publisher confirms on by default, and an unroutable message is returned rather than raised, so the code checks for `Basic.Ack` itself.
+
+**`pamqp`:** `src/queue.py` imports `pamqp.commands.Basic` to recognise the broker's ack. `pamqp` is the AMQP frame library underneath aio-pika, through `aiormq`, so it's installed with aio-pika and isn't listed in `requirements.txt`. It's a direct import of an indirect dependency, so an aio-pika upgrade could in principle move it.
+
 ## HTTP and testing
 
 ### httpx

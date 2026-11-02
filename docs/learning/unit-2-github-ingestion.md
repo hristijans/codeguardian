@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`
 
 ## GitHub settings
 
@@ -120,7 +120,9 @@ The route in `src/main.py` runs these checks in a fixed order, and the order is 
 | 4 | Is the action `opened`, `reopened`, or `synchronize`, and is the repository on the allowlist? | 200 `{"status": "ignored"}` |
 | 5 | Is there an `X-GitHub-Delivery` header? | 400 `Missing delivery ID` |
 | 6 | Has this delivery already created a job? | 200 `{"status": "duplicate", "job_id": ...}` |
-| 7 | Accepted, and the job is saved as `queued` | 202 with `job_id` and `queued` |
+| 7 | Accepted: the job is saved as `queued` and published to RabbitMQ | 202 with `job_id` and `queued` |
+
+If saving or publishing fails, the claim is released and the request fails with a 500. A failed publish also marks the job `failed`.
 
 **Why the body isn't a function parameter.** The usual FastAPI style is `payload: PRWebhookPayload` in the signature, like type-hinting a FormRequest in a Laravel controller. FastAPI would then parse and validate the body before your code runs. That is the wrong order here, because the signature must be checked first, on the original bytes. So the route takes `request: Request`, calls `await request.body()`, and calls `model_validate_json` itself. Laravel's nearest pattern is verifying the signature in middleware before the controller reads the input.
 
@@ -285,16 +287,93 @@ The tests use the real Redis container. `deliver()` sends a fresh `test-<uuid>` 
 
 `test_failed_save_releases_the_claim` uses a `FailingStore` subclass whose `save` raises. `ASGITransport` passes app errors through to the test rather than turning them into a 500, so the test expects the exception itself.
 
+## Publishing jobs: `src/queue.py`
+
+Once a job is saved, the route publishes a message to RabbitMQ, and the worker in step 2.10 will take it from there. This is the part Laravel hides behind `dispatch(new ReviewJob(...))`. Here the queue, the message, and the broker's answer are all handled in code.
+
+### The queue: durable
+
+```python
+QUEUE_NAME = "pr_analysis_queue"
+
+async def declare_queue(channel, name=QUEUE_NAME):
+    return await channel.declare_queue(name, durable=True)
+```
+
+**Declaring is idempotent.** `declare_queue` creates the queue if it's missing and does nothing if it already exists with the same settings, so it is safe to call every time the app starts. Both the API and the worker will declare it, so neither depends on the other starting first.
+
+**Declare before publishing.** A message sent to a queue that doesn't exist is dropped, so the lifespan declares the queue before the app takes any requests.
+
+**`durable=True` keeps the queue itself across a broker restart.** It says nothing about the messages in it, which is the next part.
+
+**Settings can't change once the queue exists.** RabbitMQ rejects a declaration whose settings differ from the existing queue's, with `PRECONDITION_FAILED - inequivalent arg 'durable'`. That happened during verification: a deliberate `durable=False` break stopped the dev server from starting. Changing a queue's settings later means deleting the queue first, and any messages in it go with it. The durability test uses this rule: it declares the test queue again with `durable=False`, and the broker's refusal proves the queue really is durable.
+
+### The message: persistent JSON
+
+```python
+amqp_message = aio_pika.Message(
+    body=message.model_dump_json().encode(),
+    content_type="application/json",
+    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+    message_id=message.job_id,
+)
+```
+
+**`PERSISTENT` writes the message to disk**, so it survives a broker restart, as long as the queue is durable too. Either one alone loses the message. Verification checked this for real: one persistent and one transient message went into a durable queue, RabbitMQ was restarted, and only the persistent one was still there.
+
+**The body is a `ReviewJobMessage`**, a new model in `src/schemas.py` with `job_id`, `repo_name`, `pr_number`, and `head_sha`. That's everything the worker needs to fetch the diff, so the worker doesn't depend on the Redis record still existing. The job's status deliberately isn't in the message, because it would be out of date as soon as the worker changed it. AMQP bodies are bytes, hence `.encode()`.
+
+**`message_id` is the job ID**, so a message can be traced back to its job in RabbitMQ's management UI.
+
+### The broker's answer: check for an ack
+
+```python
+result = await self._channel.default_exchange.publish(
+    amqp_message, routing_key=self._queue_name
+)
+if not isinstance(result, Basic.Ack):
+    raise PublishError(...)
+```
+
+**The default exchange** routes a message to the queue whose name equals the routing key. RabbitMQ always sends messages through an exchange, and this built-in one is the simplest. Named exchanges come in when one message must reach several queues.
+
+**Publisher confirms.** aio-pika turns on confirms for each channel by default, so `publish` waits until the broker answers. `Basic.Ack` means the broker has taken responsibility for the message. For a persistent message on a durable queue, that means it has been written to disk.
+
+**An unroutable message doesn't raise.** This was checked before the code was written. If no queue matches the routing key, the broker sends the message back, and `publish` returns that returned message instead of raising. A plain `await publish(...)` would treat that as success, and the job would be lost silently. So anything other than an ack raises `PublishError`, and `test_publishing_to_a_missing_queue_raises` proves it.
+
+`Basic` comes from `pamqp`, the AMQP library underneath aio-pika. See [libraries.md](libraries.md).
+
+### In the route: save, then publish
+
+The route saves the job first and publishes second, so a worker can never receive a job that has no record.
+
+If publishing fails, the job is marked `failed`, with an `error` naming the exception type, and the claim is released. The request then fails with a 500. A job left as `queued` with no message would wait forever. Releasing the claim lets a redelivery create a new job, so the failed job stays behind as a record of the attempt.
+
+### One connection for the app
+
+The lifespan opens one RabbitMQ connection and one channel at startup, next to the Redis client, and `get_job_publisher` builds a `JobPublisher` on that channel. Unlike the Redis client, `connect_robust` connects straight away, so the API won't start without RabbitMQ. Compose already starts the API only once RabbitMQ is healthy.
+
+**`connect_robust` reconnects by itself, but not instantly.** Verification restarted RabbitMQ under a running server and sent a delivery every half second. Every delivery failed with a 500 (`ChannelInvalidStateError`) for about 12.5 seconds, then they succeeded again with no intervention. Each failed request marked its job `failed` and released its claim, as designed.
+
+### Tests
+
+`tests/test_queue.py` runs against the real RabbitMQ container. The `test_queue` fixture in `tests/conftest.py` declares a durable queue with a unique `test-<uuid>` name and deletes it afterwards. The webhook tests send the route's messages to that queue too, through a `get_job_publisher` override, because a running worker would take test messages from the real queue. The `drain` helper takes every message off a queue with `queue.get(fail=False)`, which returns `None` when the queue is empty, instead of waiting.
+
+`while (message := await queue.get(fail=False)) is not None:` uses `:=`, the walrus operator. It assigns and tests in one expression, like `while (($message = $queue->get()) !== null)` in PHP.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
-- **Accepted jobs aren't queued yet.** Each accepted job is saved in Redis as `queued`, but nothing is published to RabbitMQ, so no worker ever picks it up. Step 2.7 adds that, and step 2.8 adds the API to look a job up.
+- **Nothing consumes the queue yet.** Accepted jobs are published to `pr_analysis_queue`, but the worker arrives in step 2.10, so messages wait there. Step 2.8 adds the API to look a job up.
+- **A broker outage fails deliveries.** While RabbitMQ is down or reconnecting, about 12.5 seconds for a restart in testing, every accepted delivery fails with a 500, and GitHub doesn't retry on its own. Each one has to be redelivered by hand. Retrying the publish, or saving messages to send later (the outbox pattern), would fix this, and neither is planned yet.
+- **A second failure can leave a stuck job.** If marking a job `failed` after a failed publish itself fails, for example because Redis also went down, the job stays `queued` with no message, the claim isn't released, and the new error replaces the original one.
+- **The module name `queue.py` matches the standard library's `queue`.** `src.queue` is safe as long as code is run as part of the `src` package, for example `python -m src.worker`. Running a file inside `src/` directly would put `src/` on the import path, and `import queue` anywhere, including inside the standard library, would then find this file.
 - **The local allowlist is empty.** `REVIEW_REPOSITORIES` is `""` in the local `.env`, so every event is ignored until a real repository is added for step 2.11.
 - **The allowlist only reads from the environment.** Step 4.10 adds the database as a source.
 - **A misspelled name fails silently.** The event is ignored with a 200, and nothing warns that the value doesn't match a real repository.
 - **A valid request can be replayed.** The signature covers only the body, not the headers or a timestamp, so a captured request stays valid. Deduplication catches an exact copy for 24 hours, but the `X-GitHub-Delivery` header isn't signed, so a replay with a new ID gets through. It handles redeliveries, not attacks.
 - **The same commit can be reviewed twice.** Deduplication is per delivery. Two different events for the same head commit, such as a quick close and reopen, each create a job.
-- **Redis is required to accept a job.** If Redis is down, the route fails with a 500, and the delivery has to be sent again once Redis is back.
+- **Redis and RabbitMQ are both required to accept a job.** If either is down, the route fails with a 500, and the delivery has to be sent again once it's back.
 - **The worker doesn't use the schemas yet.** The route and job store now use `JobStatusDetails`, and the worker in step 2.10 may show that a field is missing.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
 - **Saves can overwrite each other.** `save` replaces the whole record, so if two writers load, change, and save the same job, the later save wins and the earlier change is lost. Only the worker changes a job after it is created, so this isn't expected to happen yet.
@@ -305,7 +384,11 @@ The tests use the real Redis container. `deliver()` sends a fresh `test-<uuid>` 
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
 
-Step 2.6, on 2026-11-02: 92 passed. The new tests failed first, because `claim_delivery` and `get_job_store` didn't exist. Seven deliberate breaks were each caught and then reverted: never detecting duplicates, not releasing the claim after a failed save, no missing-ID check, not saving the job, a claim without an expiry, a claim without `NX`, and claiming before the filters. The `NX` break passed the first set of tests, which is why `test_losing_claim_does_not_replace_the_winner` was added. A temporary server in the `api` container, with a test allowlist, checked the lifespan: the first signed delivery gave 202, the repeat gave 200 `duplicate` with the same job ID, both keys had a TTL of 86400, and shutdown completed. The test keys were deleted, and no `test-*` keys were left in Redis.
+Step 2.7, on 2026-11-02: 101 passed. The new tests failed first, because `src/queue.py` didn't exist. Before writing the publisher, a probe showed that with confirms on, an unroutable publish returns a returned message rather than raising. Six deliberate breaks were each caught and then reverted: a non-durable queue, transient messages, not checking for an ack, the route not publishing, a failed publish leaving the job `queued`, and a failed publish keeping the claim. Two live checks were run. First, a persistent and a transient message were published to a durable test queue and RabbitMQ was restarted: only the persistent one was left. Second, a temporary server was sent a delivery every half second across a RabbitMQ restart: it failed with 500 for about 12.5 seconds, then recovered by itself, and every successful publish reached `pr_analysis_queue`. All test jobs, claims, and messages were deleted afterwards.
+
+A correction to the step 2.6 record: its check for leftovers searched only `*test-*` keys, and job keys don't contain that. Step 2.7 found 18 leftover fixture jobs and a `delivery:None` claim in Redis. They came from step 2.6's deliberate-break runs, which bypass the claims that the test cleanup relies on. They were deleted, and two normal runs then left no job keys. The step 2.7 checks counted every `job:*` and `delivery:*` key.
+
+Step 2.6, same day: 92 passed. The new tests failed first, because `claim_delivery` and `get_job_store` didn't exist. Seven deliberate breaks were each caught and then reverted: never detecting duplicates, not releasing the claim after a failed save, no missing-ID check, not saving the job, a claim without an expiry, a claim without `NX`, and claiming before the filters. The `NX` break passed the first set of tests, which is why `test_losing_claim_does_not_replace_the_winner` was added. A temporary server in the `api` container, with a test allowlist, checked the lifespan: the first signed delivery gave 202, the repeat gave 200 `duplicate` with the same job ID, both keys had a TTL of 86400, and shutdown completed. The test keys were deleted, and no `test-*` keys were left in Redis.
 
 Step 2.5, same day: 80 passed, and the new tests failed first because `src/cache.py` didn't exist. Five deliberate breaks were each caught and then reverted: no expiry, a 12-hour expiry, a different key prefix, no check for a missing key, and storing a Python repr instead of JSON. No `job:*` keys were left in Redis after the run.
 
