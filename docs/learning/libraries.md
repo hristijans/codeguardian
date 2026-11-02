@@ -90,7 +90,9 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **What it does:** HTTP client with both sync and async support.
 
-**Why it is used:** Tests call the app with it. Unit 2 will also use it to call the GitHub API.
+**Why it is used:** Tests call the app with it, and `GitHubClient` in `src/github.py` uses it to call the GitHub API. It was already installed, and its async client fits the rest of the app.
+
+**Mocking:** The GitHub client tests use `httpx.MockTransport`, which is built into httpx and replaces the network with a function. The alternative was `respx`, a separate library that patches httpx and matches routes. It reads more neatly for many routes, but one endpoint doesn't need another dependency.
 
 **Laravel equivalent:** The `Http` facade, and test methods such as `$this->getJson()`.
 

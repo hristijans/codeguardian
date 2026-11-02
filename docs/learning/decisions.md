@@ -215,3 +215,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** A plain `str`, which sends any value to Redis and makes an uppercase ID a 404. Returning 404 for a malformed ID, which hides the difference between "no such job" and "that isn't a job ID".
 
 **Implemented:** Yes.
+
+## D22: One small GitHub client class with a single error type (2026-11-02)
+
+**Decision:** `GitHubClient` wraps an `httpx.AsyncClient`, fetches diffs with the `application/vnd.github.diff` media type, adds the token per request, follows redirects, checks the repository name and PR number before building the URL, and raises `GitHubError` with an optional status code for every failure. Tests replace the network with `httpx.MockTransport`.
+
+**Why:** One class keeps authentication in one place, so a GitHub App can replace the token later. One error type gives the worker one thing to catch, and the status code still lets it tell a 404 from a 500. Keeping response bodies out of error messages stops them from echoing request details into job records and logs.
+
+**Rejected:** A GitHub SDK such as PyGithub or githubkit, which would be more to learn and hide the HTTP that this unit is meant to show. Separate exception classes for each status, which the worker doesn't need yet. Fetching the PR as JSON and then its `diff_url`, which is two requests instead of one. `respx` for mocking, see [libraries.md](libraries.md).
+
+**Implemented:** Yes. Nothing calls it until the worker in step 2.10.

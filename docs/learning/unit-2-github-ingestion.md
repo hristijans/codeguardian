@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`
 
 ## GitHub settings
 
@@ -399,6 +399,64 @@ The duplicate response from the webhook route returns the original `job_id`, and
 
 `tests/test_jobs.py` saves jobs straight into the store and reads them back over HTTP. The `make_job` fixture moved from `tests/test_cache.py` to `tests/conftest.py` so both files can use it. `test_accepted_job_can_be_looked_up` in `tests/test_webhooks.py` checks the whole path: a signed delivery, then a lookup of the ID it returned.
 
+## GitHub client: `GitHubClient` in `src/github.py`
+
+GitHub webhooks don't include the diff, so the worker has to fetch it. `GitHubClient` does that, and it is the only code that knows how the app authenticates with GitHub. Nothing calls it yet. The worker in step 2.10 will.
+
+```python
+async with GitHubClient(settings.GITHUB_TOKEN) as github:
+    diff = await github.fetch_diff("example-org/example-repo", 42)
+```
+
+### The request
+
+```python
+response = await self._http.get(
+    f"/repos/{repo_name}/pulls/{pr_number}",
+    headers={
+        "Accept": "application/vnd.github.diff",
+        "Authorization": f"Bearer {self._token.get_secret_value()}",
+    },
+)
+```
+
+**The `Accept` header picks the format.** The same URL returns the pull request as JSON by default. With `application/vnd.github.diff`, GitHub returns the unified diff as plain text instead, the same text as `git diff`. So `response.text` is the whole result.
+
+**Fixed headers live on the `httpx.AsyncClient`.** `base_url`, `User-Agent`, and `X-GitHub-Api-Version` are set once. GitHub rejects API requests without a `User-Agent`, and the version header pins the API's behaviour to a dated version, `2022-11-28`, so a later default can't change responses under the app. It's like `Http::withHeaders([...])->baseUrl(...)` in Laravel, kept in one place.
+
+**The token is added per request.** A GitHub App, which the curriculum keeps open as a later replacement, uses tokens that expire after an hour. Building the header for each request means a fresh token could be fetched at that point, and nothing outside the class would change. `get_secret_value()` is called only here, so the one place the token leaves its `SecretStr` is easy to find.
+
+**Redirects are followed.** GitHub answers requests for a renamed repository with a 301 to the new address. httpx doesn't follow redirects unless `follow_redirects=True`, so the 301 would otherwise come back as the result. httpx removes the `Authorization` header if a redirect leads to a different host, so the token only follows redirects within api.github.com.
+
+**The timeout is 30 seconds.** httpx's default is 5, and a large diff can take longer.
+
+### `async with` and `__aenter__` / `__aexit__`
+
+`httpx.AsyncClient` keeps a pool of open connections, which should be closed when the work is done. Defining `__aenter__` and `__aexit__` lets `GitHubClient` be used with `async with`. `__aexit__` runs when the block ends, even if it ends with an exception, and closes the pool. PHP has no direct equivalent. The closest is a `try` / `finally` that calls `close()`. The tests' `yield` fixtures and the FastAPI lifespan are the same idea.
+
+### Checking the inputs
+
+```python
+_REPO_NAME = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
+
+if not _REPO_NAME.fullmatch(repo_name) or repo_name.split("/")[1] in {".", ".."}:
+    raise ValueError("Repository name must be owner/name")
+if pr_number < 1:
+    raise ValueError("Pull request number must be positive")
+```
+
+The repository name goes into the URL path, so a value such as `a/b/c`, `../repo`, or `repo?x=1` could send the request to a different endpoint. The name has already passed the signature check and the allowlist, but the client is the code that builds the URL, so it checks for itself. `fullmatch` requires the whole string to match, unlike `match`, which only anchors the start. The pattern is looser than GitHub's exact naming rules on purpose: its job is keeping the path intact, and a name GitHub wouldn't allow just gets a 404. A bad value raises `ValueError`, not `GitHubError`, because it's a bug in the caller, not a failure at GitHub.
+
+### Errors: one `GitHubError`
+
+Every failure raises `GitHubError`, so the worker has one exception to catch. `status_code` holds the HTTP status, or `None` when no response arrived at all, such as a refused connection or a timeout. `response.is_error` is true for any 4xx or 5xx status.
+
+**The message never includes the response body.** A body could echo request details back, so the message holds only the status, repository, and PR number. Network errors are reduced to their exception type, because httpx's own error text can include the URL. `raise ... from None` keeps the original exception out of the chain for the same reason. `test_error_message_never_contains_the_token` uses a fake server that echoes the `Authorization` header in its error body, and checks that the token still doesn't appear.
+
+### Tests: `httpx.MockTransport`
+
+`tests/test_github_client.py` never touches the network. httpx sends every request through a *transport*, and `MockTransport` is a built-in one that calls a function instead. `GitHubClient` accepts a `transport` for this reason. The `FakeGitHub` class in the test records each request and answers with whatever the test chooses, so a test can check the exact URL and headers that were sent, or make GitHub return a 404, a 301, or a connection error. Laravel's `Http::fake()` with `Http::assertSent()` is the same idea.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
@@ -415,6 +473,10 @@ The duplicate response from the webhook route returns the original `job_id`, and
 - **The worker doesn't use the schemas yet.** The route and job store now use `JobStatusDetails`, and the worker in step 2.10 may show that a field is missing.
 - **Anyone who can reach the API can read any job.** The jobs route has no authentication. Job IDs are random UUIDs, so they're hard to guess, but a record shows the repository, PR number, and title. Fine for a local stack, not for a public one.
 - **A corrupt record gives a 500.** If a stored record no longer fits `JobStatusDetails`, for example after a field is added later without a default, `store.get` raises and the route fails instead of returning a 404.
+- **The diff can be newer than the job.** `fetch_diff` returns the pull request as it is when called, and that endpoint can't be asked for a specific commit. If a new commit is pushed between the webhook and the fetch, the job's `head_sha` and the diff won't match. The newer push sends its own `synchronize` event, so that commit gets a job too.
+- **No rate-limit handling.** A 403 or 429 from GitHub's rate limit is reported like any other error, without waiting for the reset time.
+- **Very large diffs are untested.** GitHub returns an error instead of a diff for pull requests over its size limits. The client would raise `GitHubError` with that status, but the exact limits and status code haven't been checked. Step 3.5 deals with diff size.
+- **The token is still a placeholder.** The client has only been run against real GitHub with a fake token. A real fetch waits for step 2.11.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
 - **Saves can overwrite each other.** `save` replaces the whole record, so if two writers load, change, and save the same job, the later save wins and the earlier change is lost. Only the worker changes a job after it is created, so this isn't expected to happen yet.
 - **Redis isn't durable storage.** If Redis restarts without persistence, or a job is older than 24 hours, the record is gone. Lasting results belong in Postgres, which Units 3 and 4 add.
@@ -424,7 +486,9 @@ The duplicate response from the webhook route returns the original `job_id`, and
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
 
-Step 2.8, on 2026-11-02: 109 passed. The new tests failed first, because the route didn't exist. Four deliberate breaks were each caught and then reverted: a plain `str` path parameter, no 404, the wrong response model, and not normalising the ID. Against the running API, a saved job returned 200 by its ID and by its uppercase ID, an unknown UUID returned 404, `not-a-uuid` returned 422 `uuid_parsing`, and the route appeared in `/openapi.json`. The test job was deleted, and no `job:*` or `delivery:*` keys were left.
+Step 2.9, on 2026-11-02: 131 passed. The new tests failed first, because `GitHubClient` didn't exist. Eight deliberate breaks were tried, and seven were caught and then reverted: the JSON `Accept` header, not following redirects, no repository name check, no `..` check, the response body in the error message, network errors not wrapped, and no PR number check. The eighth, setting the token as a client default header, wasn't caught, and no test was added: it changes no behaviour, only where the header is built. One live, read-only call to api.github.com with a deliberately fake token and the placeholder repository returned `GitHubError` with status 401 and the message `GitHub returned 401 for example-org/example-repo#1`.
+
+Step 2.8, same day: 109 passed. The new tests failed first, because the route didn't exist. Four deliberate breaks were each caught and then reverted: a plain `str` path parameter, no 404, the wrong response model, and not normalising the ID. Against the running API, a saved job returned 200 by its ID and by its uppercase ID, an unknown UUID returned 404, `not-a-uuid` returned 422 `uuid_parsing`, and the route appeared in `/openapi.json`. The test job was deleted, and no `job:*` or `delivery:*` keys were left.
 
 Step 2.7, same day: 101 passed. The new tests failed first, because `src/queue.py` didn't exist. Before writing the publisher, a probe showed that with confirms on, an unroutable publish returns a returned message rather than raising. Six deliberate breaks were each caught and then reverted: a non-durable queue, transient messages, not checking for an ack, the route not publishing, a failed publish leaving the job `queued`, and a failed publish keeping the claim. Two live checks were run. First, a persistent and a transient message were published to a durable test queue and RabbitMQ was restarted: only the persistent one was left. Second, a temporary server was sent a delivery every half second across a RabbitMQ restart: it failed with 500 for about 12.5 seconds, then recovered by itself, and every successful publish reached `pr_analysis_queue`. All test jobs, claims, and messages were deleted afterwards.
 
