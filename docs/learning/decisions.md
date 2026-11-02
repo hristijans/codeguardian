@@ -225,3 +225,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** A GitHub SDK such as PyGithub or githubkit, which would be more to learn and hide the HTTP that this unit is meant to show. Separate exception classes for each status, which the worker doesn't need yet. Fetching the PR as JSON and then its `diff_url`, which is two requests instead of one. `respx` for mocking, see [libraries.md](libraries.md).
 
 **Implemented:** Yes. Nothing calls it until the worker in step 2.10.
+
+## D23: Ack after processing, with one retry for unexpected errors (2026-11-02)
+
+**Decision:** The worker consumes `pr_analysis_queue` with `prefetch_count=1` and acks each message only after the job's final status is saved. Problems with the job itself (`GitHubError`, `ValueError`) mark it `failed` and are acked. An unreadable message is rejected without requeueing. Any other exception requeues the message once, and if the message was already redelivered, it is dropped and the job marked `failed` on a best-effort basis. A record that is missing or already `completed` or `failed` is skipped, and a `processing` record is run again.
+
+**Why:** Acking after the work means a worker that stops partway through loses nothing, since the broker hands the message on. That makes repeat deliveries normal, so the status check makes them harmless. Job failures are permanent and retrying them wastes calls. A single retry covers brief outages without letting a broken message loop forever, and RabbitMQ's `redelivered` flag tracks the retry without extra state.
+
+**Rejected:** Acking on arrival (`no_ack`), which loses the job if the worker stops. Requeueing every failure, which loops a broken message endlessly. Counting attempts in Redis or in a message header, which allows more retries but needs state that `redelivered` gives for free. A quorum queue's delivery count, which would mean deleting and redeclaring the queue (see D20's notes on queue settings). A dead-letter exchange, which is the better home for dropped messages but isn't needed until there is something to inspect them with. aio-pika's `message.process(requeue=True, reject_on_redelivered=True)`, which does the same in one line but hides the rules and leaves no place to mark the job `failed` before the reject. No prefetch limit, which lets one worker grab every waiting message.
+
+**Implemented:** Yes.

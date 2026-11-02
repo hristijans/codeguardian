@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`, `src/worker.py`, `tests/test_worker.py`, `docker-compose.yml`
 
 ## GitHub settings
 
@@ -457,10 +457,126 @@ Every failure raises `GitHubError`, so the worker has one exception to catch. `s
 
 `tests/test_github_client.py` never touches the network. httpx sends every request through a *transport*, and `MockTransport` is a built-in one that calls a function instead. `GitHubClient` accepts a `transport` for this reason. The `FakeGitHub` class in the test records each request and answers with whatever the test chooses, so a test can check the exact URL and headers that were sent, or make GitHub return a 404, a 301, or a connection error. Laravel's `Http::fake()` with `Http::assertSent()` is the same idea.
 
+## The worker: `src/worker.py`
+
+The worker is a second program, running in its own container, that takes jobs off `pr_analysis_queue`, fetches each diff, and records how the job ended. It's the equivalent of `php artisan queue:work`, except that here the loop, the ack, and the retry rule are all visible in code. The review itself is still simulated: the worker logs the diff's size and marks the job `completed`. Unit 3 puts the LangGraph agent in that spot.
+
+```text
+RabbitMQ ──message──▶ handle_message ──▶ process_job
+                          │                 │ queued → processing → completed
+                          │                 │                    └▶ failed
+                          ◀──ack / reject───┘
+```
+
+### `process_job`: moving the record through its statuses
+
+```python
+job = await self._store.get(message.job_id)
+if job is None:
+    return                      # expired or never saved: nowhere to put a result
+if job.status in FINISHED:
+    return                      # a repeat of a finished job
+job = await self._set_status(job, JobStatus.PROCESSING)
+try:
+    diff = await self._github.fetch_diff(message.repo_name, message.pr_number)
+except (GitHubError, ValueError) as error:
+    await self._set_status(job, JobStatus.FAILED, error=str(error))
+    return
+await self._set_status(job, JobStatus.COMPLETED)
+```
+
+**`processing` is saved before the slow part**, so `GET /api/v1/jobs/{id}` shows the job has started while the diff is being fetched.
+
+**A message can arrive more than once.** RabbitMQ promises *at least once*, not *exactly once*. If the worker finishes a job but stops before its ack reaches the broker, the broker delivers the message again. So the worker checks the record first: a `completed` or `failed` job is skipped, and a `processing` job is run again, because that status means a worker stopped partway through. Laravel's queue has the same rule, which is why its docs ask for idempotent jobs.
+
+**Two kinds of failure.** A problem with the job itself, such as GitHub answering 404 or an invalid repository name, would fail the same way every time, so it is saved on the record as `failed` and the method returns normally. `GitHubError` messages are safe to store because they never include the response body. Anything else, such as Redis being down or a bug, is raised for `handle_message` to deal with.
+
+**A missing record is skipped.** The message carries enough to fetch the diff (decision D20), but a result needs a record to live on, and nobody could look the job up anyway.
+
+**`_set_status`** copies the job with a new status, error, and `updated_at`, saves it, and returns the copy. `model_copy(update=...)` is Pydantic's way to make a changed copy of an immutable-style model, a little like `$model->replicate()->fill([...])`. Passing `error=None` for every status except `failed` clears any error left from an earlier attempt.
+
+### `handle_message`: what the broker is told
+
+```python
+try:
+    message = ReviewJobMessage.model_validate_json(incoming.body)
+except ValidationError:
+    await incoming.reject(requeue=False)      # will never parse
+    return
+try:
+    await self.process_job(message)
+except Exception:
+    retry = not incoming.redelivered
+    if not retry:
+        await self._give_up(message.job_id)
+    await incoming.reject(requeue=retry)
+    return
+await incoming.ack()
+```
+
+**Ack only after the work is done.** Until a message is acked, RabbitMQ holds it as *unacked* for this consumer. If the connection closes first, because the container stopped or crashed, the broker puts the message back on the queue for the next worker. Acking on arrival would lose the job in that case. The cost is the repeat delivery that `process_job` already handles.
+
+**`reject(requeue=...)`.** `requeue=True` puts the message back on the queue, and `False` drops it. (With a dead-letter exchange configured, a dropped message would go there instead. None is configured.)
+
+**One retry, using `redelivered`.** The broker sets `redelivered` on a message it has delivered before. An unexpected error on the first delivery requeues it, in case the cause was brief, such as a Redis restart. A second failure drops it, because requeueing forever would loop a broken message as fast as the worker can take it. This is roughly Laravel's `--tries=2`, except that RabbitMQ counts the attempts, not the app. The flag only says "delivered before", not how many times, so it can't count higher than one retry. RabbitMQ's quorum queues add a delivery count, which this classic queue doesn't have.
+
+**`_give_up` marks a dropped job `failed`**, so it doesn't stay `processing` forever. It stores a fixed message, not the exception text, which could contain anything. It's best effort: if the error was Redis itself failing, this fails too and is only logged.
+
+**It never raises.** aio-pika runs this method for each delivery. An exception escaping it would skip both the ack and the reject, leaving the message unacked, and with `prefetch_count=1` the worker would get no more messages until the channel closed. So every path ends in an ack or a reject.
+
+aio-pika also offers `async with incoming.process(requeue=True, reject_on_redelivered=True):`, which does the same ack-or-reject in one line. The explicit version is used here so the rules can be read, and because the give-up step needs to run before the reject. See decision D23.
+
+### `start_consuming` and `prefetch_count`
+
+```python
+await channel.set_qos(prefetch_count=1)
+queue = await declare_queue(channel, queue_name)
+return await queue.consume(worker.handle_message)
+```
+
+**`prefetch_count=1`** tells the broker to send this consumer one message at a time, and the next only after the current one is acked or rejected. Without a limit, the broker pushes every waiting message to the first worker at once, and a second worker started later would find the queue empty. One also matches what the worker does: it runs one review at a time.
+
+**The worker declares the queue too**, so it doesn't matter whether the API or the worker starts first (see "Declaring is idempotent" above).
+
+**`queue.consume(callback)`** subscribes and returns straight away. From then on aio-pika calls the callback for each message, in the background, on the event loop. Nothing in `start_consuming` loops.
+
+### `main`: running as a container
+
+`main()` sets up logging, connects to Redis and RabbitMQ, opens a `GitHubClient`, starts consuming, and then waits on an `asyncio.Event` until a signal sets it.
+
+**Why a signal handler.** `docker compose stop` sends SIGTERM to the container's main process. Linux doesn't apply the default "terminate" action to the first process in a container, so a process without a handler ignores SIGTERM, and Docker waits 10 seconds and then sends SIGKILL. `loop.add_signal_handler(signal.SIGTERM, stop.set)` lets the worker close its connections and exit at once. SIGINT, from Ctrl+C, does the same when it's run by hand.
+
+**Shutdown doesn't wait for a running job.** Closing the connection cuts off a job in progress. Its message was never acked, so the broker gives it to the next worker, which sees `processing` and runs it again.
+
+**`if __name__ == "__main__":`** runs `main()` only when the file is started as a program (`python -m src.worker`), not when tests import it. `asyncio.run` starts the event loop, the job that `php artisan` does for a queue worker.
+
+**Logging.** The worker logs job IDs, statuses, and the diff's line count. It never logs the diff, which can contain secrets. `logging.getLogger("codeguardian.worker")` names the logger so its lines can be told apart from aio-pika's.
+
+### Compose service
+
+```yaml
+worker:
+  build: { context: ., dockerfile: Dockerfile }
+  env_file: [.env]
+  volumes: [.:/app]
+  depends_on: { redis: service_healthy, rabbitmq: service_healthy }
+  command: python -m src.worker
+  restart: unless-stopped
+```
+
+It uses the same Dockerfile as the API with a different command, like running Horizon from the same Laravel image. It doesn't wait for Postgres, which it doesn't use yet. There is no `--reload`: after changing the code, run `docker compose restart worker`. `restart: unless-stopped` starts it again if it crashes, for example if RabbitMQ is unreachable when it starts.
+
+### Tests
+
+`tests/test_worker.py` has three groups.
+
+- **`process_job`** runs against the real Redis, with GitHub replaced by `httpx.MockTransport` as in the client tests. The fake GitHub's handler can be `async`, which lets one test read the job's status from Redis *while* the worker waits for the diff, and see `processing`.
+- **`handle_message`** uses `FakeIncoming`, a small stand-in for an aio-pika message that records each `ack` and `reject`. That shows exactly what the broker would be told, which a real broker can't easily show. One test checks the job's status at the moment of the ack, to prove the ack comes after the final save.
+- **`start_consuming`** runs once against the real RabbitMQ: a message published to a test queue is consumed and the job completed. Then the connection is closed, which would put an unacked message back, and the queue is checked to be empty. That test waits for the handler to finish, not just for the `completed` status, because the ack comes a moment after the save.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
-- **Nothing consumes the queue yet.** Accepted jobs are published to `pr_analysis_queue`, but the worker arrives in step 2.10, so messages wait there and jobs stay `queued`.
 - **A broker outage fails deliveries.** While RabbitMQ is down or reconnecting, about 12.5 seconds for a restart in testing, every accepted delivery fails with a 500, and GitHub doesn't retry on its own. Each one has to be redelivered by hand. Retrying the publish, or saving messages to send later (the outbox pattern), would fix this, and neither is planned yet.
 - **A second failure can leave a stuck job.** If marking a job `failed` after a failed publish itself fails, for example because Redis also went down, the job stays `queued` with no message, the claim isn't released, and the new error replaces the original one.
 - **The module name `queue.py` matches the standard library's `queue`.** `src.queue` is safe as long as code is run as part of the `src` package, for example `python -m src.worker`. Running a file inside `src/` directly would put `src/` on the import path, and `import queue` anywhere, including inside the standard library, would then find this file.
@@ -470,7 +586,11 @@ Every failure raises `GitHubError`, so the worker has one exception to catch. `s
 - **A valid request can be replayed.** The signature covers only the body, not the headers or a timestamp, so a captured request stays valid. Deduplication catches an exact copy for 24 hours, but the `X-GitHub-Delivery` header isn't signed, so a replay with a new ID gets through. It handles redeliveries, not attacks.
 - **The same commit can be reviewed twice.** Deduplication is per delivery. Two different events for the same head commit, such as a quick close and reopen, each create a job.
 - **Redis and RabbitMQ are both required to accept a job.** If either is down, the route fails with a 500, and the delivery has to be sent again once it's back.
-- **The worker doesn't use the schemas yet.** The route and job store now use `JobStatusDetails`, and the worker in step 2.10 may show that a field is missing.
+- **The review is simulated.** The worker fetches the diff and marks the job `completed` without reviewing it. Unit 3 adds the review and somewhere to store its report.
+- **One retry, then dropped.** An unexpected error is retried once. A Redis restart longer than one retry still loses the job, and with Redis down the job can't even be marked `failed`, so it keeps its last status. A dead-letter queue would keep dropped messages for inspection, and none is configured.
+- **A requeued message is retried straight away.** There is no delay between the first attempt and the retry, so a brief outage can easily outlast it.
+- **Stopping the worker cuts off a running job.** It isn't lost, because the message wasn't acked, but its work is done again by the next worker.
+- **No worker health check.** Compose only knows whether the process is running, not whether it is still consuming.
 - **Anyone who can reach the API can read any job.** The jobs route has no authentication. Job IDs are random UUIDs, so they're hard to guess, but a record shows the repository, PR number, and title. Fine for a local stack, not for a public one.
 - **A corrupt record gives a 500.** If a stored record no longer fits `JobStatusDetails`, for example after a field is added later without a default, `store.get` raises and the route fails instead of returning a 404.
 - **The diff can be newer than the job.** `fetch_diff` returns the pull request as it is when called, and that endpoint can't be asked for a specific commit. If a new commit is pushed between the webhook and the fetch, the job's `head_sha` and the diff won't match. The newer push sends its own `synchronize` event, so that commit gets a job too.
@@ -483,6 +603,8 @@ Every failure raises `GitHubError`, so the worker has one exception to catch. `s
 - **Only the GitHub secrets are hidden.** The Postgres and RabbitMQ passwords are still plain strings, so they still print with the settings object.
 
 ## Verification record
+
+Step 2.10, on 2026-11-02: 150 passed. The new tests failed first, because `src/worker.py` didn't exist. Eleven deliberate breaks were tried, and all were caught in the end and then reverted: acking before processing, not saving `processing`, not skipping finished jobs, always requeueing, never acking, requeueing an unreadable message, keeping an old error, never giving up, giving up on the first failure, and a give-up step that raises. One break, catching every exception inside `process_job`, passed the first set of tests. It showed that a bug during the fetch would leave a dropped job stuck in `processing`, so `_give_up` and `test_dropped_job_is_marked_failed` were added, and the break was then caught. Live checks against the Compose stack: the `worker` service started and logged `Waiting for jobs on pr_analysis_queue`. A job saved in Redis and published to the real queue went `queued`, `processing`, `failed`, with the error `GitHub returned 401 for example-org/example-repo#1`, because the token is a placeholder. The queue then held 0 messages with 1 consumer. `docker compose stop worker` took 0.5 seconds with exit code 0, and the worker logged `Stopping`. The live job was deleted, and no `job:*` or `delivery:*` keys were left.
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
 

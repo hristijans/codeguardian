@@ -19,6 +19,25 @@ services:
         condition: service_healthy
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: codeguardian_worker
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    # No --reload here: after changing the code, run
+    # `docker compose restart worker`.
+    command: python -m src.worker
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     container_name: codeguardian_postgres

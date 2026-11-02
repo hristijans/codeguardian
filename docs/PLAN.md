@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.10 Worker `src/worker.py` plus Compose service.** Unit 2 is under way. Accepted jobs are saved, deduplicated, published to RabbitMQ, and can be looked up. The GitHub client can fetch diffs, and nothing consumes the queue yet.
+**Next step: 2.11 Live test through smee.io.** Unit 2 is under way. Accepted jobs are saved, deduplicated, published to RabbitMQ, and consumed by the `worker` Compose service, which fetches the diff and marks the job `completed` or `failed`. The review is still simulated, and nothing has run against a real repository yet.
 
 ## How to use this plan
 
@@ -53,7 +53,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ✅ |
 | 2.8 | `GET /api/v1/jobs/{job_id}` | Returns a job, and 404 when unknown | ✅ |
 | 2.9 | GitHub client `src/github.py` | Diff fetch works against a mocked API | ✅ |
-| 2.10 | Worker `src/worker.py` plus Compose service | Job moves queued → processing → completed or failed, with ack after processing | ⬜ |
+| 2.10 | Worker `src/worker.py` plus Compose service | Job moves queued → processing → completed or failed, with ack after processing | ✅ |
 | 2.11 | Live test through smee.io | A real PR event creates a job and the diff is fetched | ⬜ |
 | 2.12 | Learning notes `unit-2-*.md` | Notes, libraries, and decisions are updated | ⬜ |
 
@@ -141,3 +141,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-02: Added the RabbitMQ publisher in `src/queue.py`, with a durable queue, persistent messages, and a required broker ack, and the route now publishes each job: 101 passed, six deliberate breaks caught, persistence proven across a broker restart, and recovery after about 12.5 seconds measured (step 2.7). Also found and deleted fixture jobs leaked by step 2.6's break runs. Next: step 2.8.
 - 2026-11-02: Added `GET /api/v1/jobs/{job_id}`, with a UUID path type so malformed IDs get a 422: 109 passed, four deliberate breaks caught, and checked against the running API (step 2.8). Next: step 2.9.
 - 2026-11-02: Added `GitHubClient` with `fetch_diff`, tested through `httpx.MockTransport`: 131 passed, seven of eight deliberate breaks caught (the uncaught one changes no behaviour), and a live call with a fake token gave a clean 401 `GitHubError` (step 2.9). Next: step 2.10.
+- 2026-11-02: Added the worker in `src/worker.py` and its Compose service, acking only after the final status is saved and retrying unexpected errors once: 150 passed, eleven deliberate breaks caught (one only after adding the give-up step), and a live job went queued → processing → failed with the placeholder token (step 2.10). Next: step 2.11.
