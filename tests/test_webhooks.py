@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -5,6 +6,8 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
+import aio_pika
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, Response
@@ -12,9 +15,11 @@ from pydantic import SecretStr
 
 from src.cache import JobStore, delivery_key, job_key
 from src.config import Settings, get_settings
+from src.github import GitHubClient
 from src.main import app, get_job_publisher, get_job_store
 from src.queue import JobPublisher, PublishError
 from src.schemas import JobStatus, ReviewJobMessage
+from src.worker import Worker, start_consuming
 
 URL = "/api/v1/webhooks/github/pr"
 SECRET = "example-webhook-secret"
@@ -458,3 +463,52 @@ async def test_accepted_job_can_be_looked_up(
     assert lookup.status_code == 200
     assert lookup.json()["status"] == "queued"
     assert lookup.json()["pr_number"] == raw_payload["pull_request"]["number"]
+
+
+@pytest.mark.asyncio
+async def test_signed_webhook_is_reviewed_by_the_worker(
+    async_client: AsyncClient,
+    raw_payload: dict,
+    store: JobStore,
+    test_queue,
+    settings: Settings,
+):
+    """The Unit 2 milestone in one test: webhook, queue, worker, status.
+
+    Everything is real except GitHub: the route, Redis, RabbitMQ, and the
+    worker's consumer. The worker reads from this test's own queue.
+    """
+    diff_requests: list[httpx.Request] = []
+
+    def fake_github(request: httpx.Request) -> httpx.Response:
+        diff_requests.append(request)
+        return httpx.Response(200, text="diff --git a/app.py b/app.py\n+x = 1\n")
+
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+    assert response.status_code == 202
+    job_id = response.json()["job_id"]
+    # Checked before the worker starts, which could otherwise finish first.
+    before = await async_client.get(f"/api/v1/jobs/{job_id}")
+    assert before.json()["status"] == "queued"
+
+    connection = await aio_pika.connect_robust(settings.rabbitmq_url)
+    github = GitHubClient(
+        SecretStr("example-token"), transport=httpx.MockTransport(fake_github)
+    )
+    try:
+        async with github:
+            channel = await connection.channel()
+            await start_consuming(channel, Worker(store, github), test_queue.name)
+            for _ in range(50):
+                job = (await async_client.get(f"/api/v1/jobs/{job_id}")).json()
+                if job["status"] in ("completed", "failed"):
+                    break
+                await asyncio.sleep(0.1)
+    finally:
+        await connection.close()
+
+    assert job["status"] == "completed"
+    assert job["error"] is None
+    [request] = diff_requests
+    number = raw_payload["pull_request"]["number"]
+    assert request.url.path == f"/repos/example-org/example-repo/pulls/{number}"

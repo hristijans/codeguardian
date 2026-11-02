@@ -1,8 +1,45 @@
 # Unit 2: GitHub Ingestion
 
-Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
+Unit 2 connects the app to GitHub. It receives signed webhook events, turns the ones worth reviewing into jobs, queues them, and has a separate worker fetch each pull request's diff and record how the job ended. The review itself is still simulated. Unit 3 adds it.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`, `src/queue.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`, `src/worker.py`, `tests/test_worker.py`, `docker-compose.yml`, `.env.example`
+## The whole flow
+
+```text
+GitHub ──signed POST──▶ POST /api/v1/webhooks/github/pr      (src/main.py)
+                          1. signature over the raw bytes    (src/github.py: verify_signature)
+                          2. event, action, allowlist filters
+                          3. claim the delivery ID           (src/cache.py: JobStore)
+                          4. save the job as "queued"        (Redis, 24-hour expiry)
+                          5. publish a ReviewJobMessage      (src/queue.py: JobPublisher)
+                          └─▶ 202 {"job_id", "status": "queued"}
+
+RabbitMQ pr_analysis_queue ──▶ worker container              (src/worker.py)
+                          6. "processing", fetch the diff    (src/github.py: GitHubClient)
+                          7. "completed" or "failed"
+                          8. ack the message
+
+Client ──▶ GET /api/v1/jobs/{job_id} ──▶ the job's current record from Redis
+```
+
+Two things in this flow are worth holding on to. First, **the API never does the slow work**: it answers GitHub within milliseconds, and the worker can take as long as a review needs. That's why Laravel has queues too. Second, **each hand-off is made safe against repeats**. A redelivered webhook finds its claim (step 3), a message delivered twice finds its job already finished (step 6), and a worker that stops halfway leaves an unacked message for the next one (step 8).
+
+Locally, GitHub's events reach the API through a smee.io relay. See "Live webhooks through smee.io".
+
+## Files
+
+| Role | Files |
+|---|---|
+| Settings | `src/config.py`, `.env.example` |
+| Models | `src/schemas.py` |
+| Webhook and jobs routes | `src/main.py` |
+| Signature check and GitHub API client | `src/github.py` |
+| Job store and delivery claims (Redis) | `src/cache.py` |
+| Queue and publisher (RabbitMQ) | `src/queue.py` |
+| Worker | `src/worker.py` |
+| Compose services `worker` and `smee` | `docker-compose.yml` |
+| Tests | `tests/conftest.py`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/test_cache.py`, `tests/test_queue.py`, `tests/test_jobs.py`, `tests/test_github_client.py`, `tests/test_worker.py`, `tests/fixtures/pull_request_opened.json` |
+
+The sections below follow the order the pieces were built in, which is also the order a request meets them.
 
 ## GitHub settings
 
@@ -15,7 +52,7 @@ GITHUB_WEBHOOK_SECRET: SecretStr
 
 **`GITHUB_TOKEN`** lets the app call the GitHub API. It is a fine-grained personal access token, limited to chosen repositories, with Pull requests read and write and Contents read.
 
-**`GITHUB_WEBHOOK_SECRET`** is a shared value you also enter on GitHub. GitHub uses it to sign each webhook, and the app will use it to check that signature in step 2.3.
+**`GITHUB_WEBHOOK_SECRET`** is a shared value you also enter on GitHub. GitHub uses it to sign each webhook, and the app uses it to check that signature (see "Signature verification").
 
 Neither has a default, so the app won't start without them, matching the rule for other credentials in [decisions.md](decisions.md).
 
@@ -52,22 +89,22 @@ So the code reads `payload.pull_request.head.sha`, and a missing `sha` fails val
 Three choices shape it:
 
 - **Only the needed fields are declared.** Pydantic ignores undeclared fields by default, so GitHub adding a field can't break the app.
-- **`action` is a plain `str`.** It would be tempting to allow only `opened`, `reopened`, and `synchronize`, but then a `closed` event would fail validation and GitHub would see an error. Skipping an action is the route's decision, in step 2.4, and a skipped event is still a valid one.
+- **`action` is a plain `str`.** It would be tempting to allow only `opened`, `reopened`, and `synchronize`, but then a `closed` event would fail validation and GitHub would see an error. Skipping an action is the route's decision, and a skipped event is still a valid one.
 - **It only fits `pull_request` events.** A `ping` has no `pull_request` key and would fail, so the route has to check the event type before validating.
 
 ### Job models
 
 `JobStatus` lists the four states as a `StrEnum`, an enum whose members are also strings. `JobStatus.QUEUED == "queued"` is true, and text from JSON converts straight back to a member. It's like a PHP backed enum, `enum JobStatus: string`. An unknown status is rejected.
 
-`JobResponse` is the short reply to a webhook. `JobStatusDetails` is the full record: the job's status, what it reviews, its timestamps, and an optional `error`. Later steps will store it in Redis and return it from the jobs endpoint.
+`JobResponse` is the short reply to a webhook. `JobStatusDetails` is the full record: the job's status, what it reviews, its timestamps, and an optional `error`. It is what the job store saves in Redis and what the jobs endpoint returns. `ReviewJobMessage` is the queue message, described under "Publishing jobs".
 
 `error: Optional[str] = None` means the value may be missing. `Optional[str]` allows `None`, and the `= None` is what makes the field not required. The type alone doesn't.
 
-`model_dump_json()` turns a model into JSON, and `model_validate_json()` validates JSON back into a model, restoring the enum and `datetime` types. Redis only stores text, so step 2.5 depends on this round trip.
+`model_dump_json()` turns a model into JSON, and `model_validate_json()` validates JSON back into a model, restoring the enum and `datetime` types. Redis only stores text, so the job store depends on this round trip.
 
 ### Tests
 
-`tests/fixtures/pull_request_opened.json` is a sample event with placeholder names. It was written by hand from memory of GitHub's format, with only a subset of the real fields, so it isn't a captured event. Step 2.11 is the first check against a real one.
+`tests/fixtures/pull_request_opened.json` is a sample event with placeholder names. It was written by hand from GitHub's format, with only a subset of the real fields, so it isn't a captured event. The live test in step 2.11 showed that real events fit the same model: a real `opened` event was accepted with a 202.
 
 ## Signature verification: `src/github.py`
 
@@ -102,7 +139,7 @@ def verify_signature(body: bytes, signature_header: Optional[str], secret: str) 
 
 **The whole string is compared, prefix included.** That rejects a missing prefix and `sha1=` without extra branches.
 
-The function returns `True` or `False` and knows nothing about HTTP. Turning `False` into a 401 is the route's job, in step 2.4.
+The function returns `True` or `False` and knows nothing about HTTP. Turning `False` into a 401 is the route's job.
 
 ### Tests
 
@@ -200,7 +237,7 @@ class JobStore:
 
 **The expiry is set in the same command.** `set(..., ex=...)` stores the value and its expiry at once. A separate `expire` call afterwards could be skipped if the app crashed in between, leaving a key that never expires. Every save restarts the 24 hours, so a job expires a day after its last change, not a day after it was created.
 
-**The client is passed in.** `JobStore` takes a Redis client instead of creating one. The app will create one client and share it, and the tests pass their own. It's the same idea as Laravel's constructor injection: the class says what it needs, and something else builds it.
+**The client is passed in.** `JobStore` takes a Redis client instead of creating one. The app creates one client at startup and shares it (see "One Redis client for the app"), and the tests pass their own. It's the same idea as Laravel's constructor injection: the class says what it needs, and something else builds it.
 
 **`job_key` is a function.** The `job:` prefix is used in the store, in the tests, and later by anything that inspects Redis, so it lives in one place. The `job:{job_id}:stream` key in Unit 5 will follow the same scheme.
 
@@ -289,7 +326,7 @@ The tests use the real Redis container. `deliver()` sends a fresh `test-<uuid>` 
 
 ## Publishing jobs: `src/queue.py`
 
-Once a job is saved, the route publishes a message to RabbitMQ, and the worker in step 2.10 will take it from there. This is the part Laravel hides behind `dispatch(new ReviewJob(...))`. Here the queue, the message, and the broker's answer are all handled in code.
+Once a job is saved, the route publishes a message to RabbitMQ, and the worker takes it from there. This is the part Laravel hides behind `dispatch(new ReviewJob(...))`. Here the queue, the message, and the broker's answer are all handled in code.
 
 ### The queue: durable
 
@@ -300,7 +337,7 @@ async def declare_queue(channel, name=QUEUE_NAME):
     return await channel.declare_queue(name, durable=True)
 ```
 
-**Declaring is idempotent.** `declare_queue` creates the queue if it's missing and does nothing if it already exists with the same settings, so it is safe to call every time the app starts. Both the API and the worker will declare it, so neither depends on the other starting first.
+**Declaring is idempotent.** `declare_queue` creates the queue if it's missing and does nothing if it already exists with the same settings, so it is safe to call every time the app starts. Both the API and the worker declare it, so neither depends on the other starting first.
 
 **Declare before publishing.** A message sent to a queue that doesn't exist is dropped, so the lifespan declares the queue before the app takes any requests.
 
@@ -401,7 +438,7 @@ The duplicate response from the webhook route returns the original `job_id`, and
 
 ## GitHub client: `GitHubClient` in `src/github.py`
 
-GitHub webhooks don't include the diff, so the worker has to fetch it. `GitHubClient` does that, and it is the only code that knows how the app authenticates with GitHub. Nothing calls it yet. The worker in step 2.10 will.
+GitHub webhooks don't include the diff, so the worker has to fetch it. `GitHubClient` does that, and it is the only code that knows how the app authenticates with GitHub. The worker calls it for each job.
 
 ```python
 async with GitHubClient(settings.GITHUB_TOKEN) as github:
@@ -574,6 +611,12 @@ It uses the same Dockerfile as the API with a different command, like running Ho
 - **`handle_message`** uses `FakeIncoming`, a small stand-in for an aio-pika message that records each `ack` and `reject`. That shows exactly what the broker would be told, which a real broker can't easily show. One test checks the job's status at the moment of the ack, to prove the ack comes after the final save.
 - **`start_consuming`** runs once against the real RabbitMQ: a message published to a test queue is consumed and the job completed. Then the connection is closed, which would put an unacked message back, and the queue is checked to be empty. That test waits for the handler to finish, not just for the `completed` status, because the ack comes a moment after the save.
 
+### The end-to-end test
+
+`test_signed_webhook_is_reviewed_by_the_worker` in `tests/test_webhooks.py` is the unit's milestone in one test. It sends a signed delivery to the route, checks that the job starts as `queued`, starts a real `Worker` consuming from the test's own queue, and polls `GET /api/v1/jobs/{job_id}` until the job reaches `completed`. Redis, RabbitMQ, the route, and the consumer are all real. Only GitHub is replaced, by `httpx.MockTransport`, and the test checks that the diff was asked for with the right repository and PR number. Two deliberate breaks show it can fail: a publisher that sends nothing, and a worker that never sets `completed`.
+
+The `queued` check comes before the worker starts, because once it's running it could finish the job before the first poll.
+
 ## Live webhooks through smee.io
 
 GitHub can't reach `localhost`, so a relay carries its webhooks in. [smee.io](https://smee.io) gives out a public channel URL. GitHub posts each event to that URL, and `smee-client`, running locally, holds a connection open to the channel and posts each event again to the API.
@@ -664,6 +707,10 @@ The token, secret, channel, and repository live only in `.env`, never in the rep
 - **Only the GitHub secrets are hidden.** The Postgres and RabbitMQ passwords are still plain strings, so they still print with the settings object.
 
 ## Verification record
+
+Step 2.14, on 2026-11-02: 151 passed. The new end-to-end test passed, and two deliberate breaks each made it fail and were then reverted: a `publish` that returns without sending, and a worker that saves `processing` instead of `completed`. Redis held only the live job and claim from step 2.11 afterwards.
+
+Step 2.12, same day: the whole file was reread. The opening now describes the finished unit, with an overview of the flow and a file table, and future-tense lines from earlier steps ("the worker in step 2.10 will", "Nothing calls it yet", "Later steps will store it") now describe the code as it is. `libraries.md` and `decisions.md` were checked: every Unit 2 dependency has an entry, and decisions D4, D5, D16, and D17 to D24 cover the unit's choices. Older entries weren't changed.
 
 Step 2.11, on 2026-11-02, against a real repository named only in `.env`: the API and worker were recreated with a fine-grained token, a generated 64-character webhook secret, the repository in the allowlist, and a smee channel, and the `smee` service was started. The owner then made three events on a test PR. Opening it gave a 202, and the worker fetched a 10-line diff with a 200 from GitHub and marked the job `completed` within a second. Editing the title to include `<`, `>`, `&`, and a non-ASCII letter gave a 200 (`edited` is ignored after the signature check), so the signature survived the relay. Redelivering the `opened` event from GitHub's webhook settings gave a 200, and Redis held one job and one delivery claim, so the redelivery reused the delivery ID. The title's characters were confirmed by reading the PR through the API with the token, printing only which characters it contained. The first `ping` was lost, because the webhook was added before the relay started.
 

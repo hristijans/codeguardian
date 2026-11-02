@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.12 Learning notes `unit-2-*.md`.** Unit 2 works end to end: a real PR event through smee.io created a job, the worker fetched its diff and completed it, a redelivery was deduplicated, and special characters survived the relay. What's left is reviewing the Unit 2 notes as a whole.
+**Next step: 3.1 Ollama access from containers and chosen model.** Unit 2 is complete: signed webhooks become jobs, a worker fetches each diff and records the outcome, an end-to-end test covers the whole path, and a live PR event through smee.io worked. The review is still simulated. Unit 3 replaces it with a LangGraph agent, starting with reaching Ollama from inside the containers. Open question for 3.1: is Ollama installed, and does the machine run `llama3.2` well?
 
 ## How to use this plan
 
@@ -55,7 +55,8 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.9 | GitHub client `src/github.py` | Diff fetch works against a mocked API | ✅ |
 | 2.10 | Worker `src/worker.py` plus Compose service | Job moves queued → processing → completed or failed, with ack after processing | ✅ |
 | 2.11 | Live test through smee.io | A real PR event creates a job and the diff is fetched | ✅ |
-| 2.12 | Learning notes `unit-2-*.md` | Notes, libraries, and decisions are updated | ⬜ |
+| 2.14 | End-to-end test: signed webhook through the worker | One automated test sends a signed webhook and sees the job reach `completed` through RabbitMQ and the worker, as the curriculum's Unit 2 milestone asks | ✅ |
+| 2.12 | Learning notes `unit-2-*.md` | Notes, libraries, and decisions are updated | ✅ |
 
 ## Unit 3: Single-agent LangGraph
 
@@ -144,3 +145,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-02: Added the worker in `src/worker.py` and its Compose service, acking only after the final status is saved and retrying unexpected errors once: 150 passed, eleven deliberate breaks caught (one only after adding the give-up step), and a live job went queued → processing → failed with the placeholder token (step 2.10). Next: step 2.11.
 - 2026-11-02: Added the `smee` relay as a Compose service under the `live` profile (D24). Reading smee-client's source showed it rebuilds the JSON body, and a probe through a throwaway channel confirmed compact JSON keeps its signature (200) while `\u003c`-style escapes lose it (401). Step 2.11 is blocked until the owner sets up the token, secret, channel, and webhook. Next: step 2.11 live run.
 - 2026-11-02: Live test through smee.io passed (step 2.11): a real PR open gave 202 and a completed job with its diff fetched, an edit with `<`, `>`, `&`, and non-ASCII in the title passed the signature check through the relay, and a redelivery from GitHub was deduplicated, confirming the delivery ID is reused. Next: step 2.12.
+- 2026-11-02: Added the end-to-end test from signed webhook through the worker to `completed`, the Unit 2 milestone: 151 passed, two deliberate breaks caught (step 2.14). Reread and tidied the Unit 2 notes: added a flow overview and file table and fixed future-tense lines from earlier steps (step 2.12). Unit 2 is done. Next: step 3.1.
