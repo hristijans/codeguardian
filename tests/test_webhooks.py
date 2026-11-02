@@ -1,15 +1,19 @@
 import hashlib
 import hmac
 import json
+import uuid
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, Response
 from pydantic import SecretStr
 
+from src.cache import JobStore, delivery_key, job_key
 from src.config import Settings, get_settings
-from src.main import app
+from src.main import app, get_job_store
+from src.schemas import JobStatus
 
 URL = "/api/v1/webhooks/github/pr"
 SECRET = "example-webhook-secret"
@@ -28,6 +32,23 @@ def webhook_secret(settings: Settings):
     app.dependency_overrides.clear()
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def store(redis_client) -> AsyncIterator[JobStore]:
+    """Point the route at the test's Redis client, and clean up afterwards.
+
+    Tests send delivery IDs starting with `test-`, so their claims and jobs can
+    be found and deleted without touching anything the running app saved.
+    """
+    store = JobStore(redis_client)
+    app.dependency_overrides[get_job_store] = lambda: store
+    yield store
+    async for key in redis_client.scan_iter(match=delivery_key("test-*")):
+        job_id = await redis_client.get(key)
+        if job_id is not None:
+            await redis_client.delete(job_key(job_id.decode()))
+        await redis_client.delete(key)
+
+
 @pytest.fixture
 def raw_payload() -> dict:
     return json.loads(FIXTURE.read_text())
@@ -43,11 +64,17 @@ async def deliver(
     body: bytes,
     event: Optional[str] = "pull_request",
     signature: Optional[str] = None,
+    delivery: Optional[str] = "new",
 ) -> Response:
     headers = {"Content-Type": "application/json"}
     headers["X-Hub-Signature-256"] = signature or sign(body)
     if event is not None:
         headers["X-GitHub-Event"] = event
+    # "new" gives each call its own ID, as GitHub does for each new delivery.
+    if delivery == "new":
+        delivery = f"test-{uuid.uuid4()}"
+    if delivery is not None:
+        headers["X-GitHub-Delivery"] = delivery
     return await client.post(URL, content=body, headers=headers)
 
 
@@ -226,3 +253,104 @@ async def test_empty_list_reviews_nothing(
 
     assert response.status_code == 200
     assert response.json() == {"status": "ignored"}
+
+
+@pytest.mark.asyncio
+async def test_accepted_job_is_saved_as_queued(
+    async_client: AsyncClient, raw_payload: dict, store: JobStore
+):
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+
+    job = await store.get(response.json()["job_id"])
+    assert job is not None
+    assert job.status == JobStatus.QUEUED
+    assert job.repo_name == raw_payload["repository"]["full_name"]
+    assert job.pr_number == raw_payload["pull_request"]["number"]
+    assert job.head_sha == raw_payload["pull_request"]["head"]["sha"]
+    assert job.title == raw_payload["pull_request"]["title"]
+    assert job.created_at == job.updated_at
+    assert job.created_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_repeated_delivery_returns_the_first_job(
+    async_client: AsyncClient, raw_payload: dict
+):
+    body = json.dumps(raw_payload).encode()
+    delivery = f"test-{uuid.uuid4()}"
+
+    first = await deliver(async_client, body, delivery=delivery)
+    second = await deliver(async_client, body, delivery=delivery)
+
+    assert first.status_code == 202
+    assert second.status_code == 200
+    assert second.json() == {
+        "status": "duplicate",
+        "job_id": first.json()["job_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_repeated_delivery_saves_no_second_job(
+    async_client: AsyncClient, raw_payload: dict, redis_client
+):
+    body = json.dumps(raw_payload).encode()
+    delivery = f"test-{uuid.uuid4()}"
+    before = {key async for key in redis_client.scan_iter(match="job:*")}
+
+    await deliver(async_client, body, delivery=delivery)
+    await deliver(async_client, body, delivery=delivery)
+
+    after = {key async for key in redis_client.scan_iter(match="job:*")}
+    assert len(after - before) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_delivery_id_is_rejected_without_a_job(
+    async_client: AsyncClient, raw_payload: dict, redis_client
+):
+    before = {key async for key in redis_client.scan_iter(match="job:*")}
+
+    response = await deliver(
+        async_client, json.dumps(raw_payload).encode(), delivery=None
+    )
+
+    assert response.status_code == 400
+    after = {key async for key in redis_client.scan_iter(match="job:*")}
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_ignored_event_does_not_claim_its_delivery(
+    async_client: AsyncClient, raw_payload: dict, redis_client
+):
+    # Otherwise a later, reviewable event can't reuse the ID. Not expected from
+    # GitHub, but claims should only mean "a job exists for this delivery".
+    raw_payload["action"] = "closed"
+    delivery = f"test-{uuid.uuid4()}"
+
+    await deliver(async_client, json.dumps(raw_payload).encode(), delivery=delivery)
+
+    assert await redis_client.exists(delivery_key(delivery)) == 0
+
+
+class FailingStore(JobStore):
+    async def save(self, job) -> None:
+        raise ConnectionError("Redis went away")
+
+
+@pytest.mark.asyncio
+async def test_failed_save_releases_the_claim(
+    async_client: AsyncClient, raw_payload: dict, redis_client
+):
+    # A failed delivery can be redelivered. A leftover claim would make the
+    # redelivery look like a duplicate of a job that was never saved.
+    app.dependency_overrides[get_job_store] = lambda: FailingStore(redis_client)
+    delivery = f"test-{uuid.uuid4()}"
+
+    with pytest.raises(ConnectionError):
+        await deliver(
+            async_client, json.dumps(raw_payload).encode(), delivery=delivery
+        )
+
+    assert await redis_client.exists(delivery_key(delivery)) == 0

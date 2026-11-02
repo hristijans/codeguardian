@@ -185,3 +185,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** A Redis hash per job, which allows updating one field without rewriting the rest, but stores every value as a string and needs a separate `EXPIRE` call. The RedisJSON module, which the standard Redis image doesn't include. Postgres, which is the place for lasting results but is more than short-lived status needs.
 
 **Implemented:** Yes. The route doesn't call it yet.
+
+## D19: Deduplicate on the delivery ID with `SET NX GET` (2026-11-02)
+
+**Decision:** The webhook route claims `delivery:{X-GitHub-Delivery}` with one `SET NX GET EX 86400` after all filters, before saving the job. A repeat gets a 200 with the original job ID. A failed save releases the claim.
+
+**Why:** One command makes the check and the claim atomic, so two copies of a delivery can't both create a job, and the winner's job ID comes back without a second read. Claiming before saving means the claim decides who creates the job.
+
+**Rejected:** Checking with `GET` and then setting, which leaves a race between the two commands. `SET NX` followed by a separate `GET`, which has a smaller race if the claim expires between them. Deduplicating on the head commit SHA, which would also skip legitimate new events for the same commit and is a different question from "have I seen this delivery?". Storing the claim inside the job record, which can't be looked up by delivery ID. Returning 202 or 409 for a repeat: 202 says new work was accepted, and 409 would show the redelivery as failed in GitHub's log.
+
+**Implemented:** Yes.

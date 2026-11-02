@@ -3,18 +3,9 @@ from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
-import redis.asyncio as aioredis
 
-from src.cache import JOB_TTL_SECONDS, JobStore, job_key
-from src.config import Settings
+from src.cache import JOB_TTL_SECONDS, JobStore, delivery_key, job_key
 from src.schemas import JobStatus, JobStatusDetails
-
-
-@pytest_asyncio.fixture
-async def redis_client(settings: Settings):
-    client = aioredis.from_url(settings.redis_url)
-    yield client
-    await client.aclose()
 
 
 @pytest.fixture
@@ -97,3 +88,57 @@ async def test_record_is_stored_as_json(store: JobStore, redis_client, make_job)
     await store.save(job)
     raw = await redis_client.get(job_key(job.job_id))
     assert JobStatusDetails.model_validate_json(raw) == job
+
+
+@pytest_asyncio.fixture
+async def delivery_id(redis_client):
+    """A fresh delivery ID whose claim is deleted after the test."""
+    value = f"test-{uuid.uuid4()}"
+    yield value
+    await redis_client.delete(delivery_key(value))
+
+
+def test_delivery_key_uses_delivery_prefix():
+    assert delivery_key("abc") == "delivery:abc"
+
+
+@pytest.mark.asyncio
+async def test_first_claim_wins(store: JobStore, delivery_id: str):
+    assert await store.claim_delivery(delivery_id, "job-1") is None
+
+
+@pytest.mark.asyncio
+async def test_second_claim_returns_the_first_job_id(
+    store: JobStore, delivery_id: str
+):
+    await store.claim_delivery(delivery_id, "job-1")
+    assert await store.claim_delivery(delivery_id, "job-2") == "job-1"
+
+
+@pytest.mark.asyncio
+async def test_claim_expires_in_24_hours(
+    store: JobStore, redis_client, delivery_id: str
+):
+    await store.claim_delivery(delivery_id, "job-1")
+    ttl = await redis_client.ttl(delivery_key(delivery_id))
+    assert JOB_TTL_SECONDS - 5 <= ttl <= JOB_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_released_claim_can_be_claimed_again(
+    store: JobStore, delivery_id: str
+):
+    await store.claim_delivery(delivery_id, "job-1")
+    await store.release_delivery(delivery_id)
+    assert await store.claim_delivery(delivery_id, "job-2") is None
+
+
+@pytest.mark.asyncio
+async def test_losing_claim_does_not_replace_the_winner(
+    store: JobStore, delivery_id: str
+):
+    # A repeat must leave the claim alone. Otherwise it would point at the
+    # repeat's job ID, which is never saved.
+    await store.claim_delivery(delivery_id, "job-1")
+    await store.claim_delivery(delivery_id, "job-2")
+    assert await store.claim_delivery(delivery_id, "job-3") == "job-1"

@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`, `tests/conftest.py`
 
 ## GitHub settings
 
@@ -118,7 +118,9 @@ The route in `src/main.py` runs these checks in a fixed order, and the order is 
 | 2 | Is this a `pull_request` event? | 200 `{"status": "ignored"}` |
 | 3 | Does the body fit `PRWebhookPayload`? | 422 `Invalid payload` |
 | 4 | Is the action `opened`, `reopened`, or `synchronize`, and is the repository on the allowlist? | 200 `{"status": "ignored"}` |
-| 5 | Accepted | 202 with `job_id` and `queued` |
+| 5 | Is there an `X-GitHub-Delivery` header? | 400 `Missing delivery ID` |
+| 6 | Has this delivery already created a job? | 200 `{"status": "duplicate", "job_id": ...}` |
+| 7 | Accepted, and the job is saved as `queued` | 202 with `job_id` and `queued` |
 
 **Why the body isn't a function parameter.** The usual FastAPI style is `payload: PRWebhookPayload` in the signature, like type-hinting a FormRequest in a Laravel controller. FastAPI would then parse and validate the body before your code runs. That is the wrong order here, because the signature must be checked first, on the original bytes. So the route takes `request: Request`, calls `await request.body()`, and calls `model_validate_json` itself. Laravel's nearest pattern is verifying the signature in middleware before the controller reads the input.
 
@@ -168,7 +170,7 @@ The order has its own tests. A bad signature on a body that isn't JSON must give
 
 ## Job store: `src/cache.py`
 
-The job store keeps the current status of each job in Redis, so the API can answer "what happened to job X?" while the worker does the review elsewhere. It isn't connected to the route yet. Step 2.6 starts saving accepted jobs, and step 2.8 reads them back.
+The job store keeps the current status of each job in Redis, so the API can answer "what happened to job X?" while the worker does the review elsewhere. The webhook route saves each accepted job here, and step 2.8 will read them back through the API.
 
 ```python
 JOB_TTL_SECONDS = 24 * 60 * 60
@@ -206,16 +208,94 @@ class JobStore:
 
 `tests/test_cache.py` runs against the real Redis container, not a fake, because the expiry is the behaviour under test and a fake would only show that the fake works. The `make_job` fixture builds records with random IDs and deletes their keys afterwards, so tests don't see each other's data and nothing is left in the Redis the running app uses. A fixture can hand back a function, as `make_job` does. That is pytest's version of a Laravel model factory.
 
+## Delivery deduplication
+
+Every webhook carries an `X-GitHub-Delivery` header, an ID that is unique to each delivery. GitHub's docs say a redelivery, sent by hand from the webhook settings or through the API, reuses the original ID. That hasn't been checked against real GitHub yet, and step 2.11 will confirm it. GitHub doesn't retry failed deliveries on its own.
+
+Without deduplication, each redelivery would create a second job and a second review of the same event. The route prevents that by claiming the delivery ID before it saves the job.
+
+```python
+job_id = str(uuid.uuid4())
+existing_job_id = await store.claim_delivery(x_github_delivery, job_id)
+if existing_job_id is not None:
+    response.status_code = status.HTTP_200_OK
+    return {"status": "duplicate", "job_id": existing_job_id}
+```
+
+### The claim: `SET NX GET`
+
+```python
+existing = await self._redis.set(
+    delivery_key(delivery_id), job_id, nx=True, get=True, ex=JOB_TTL_SECONDS
+)
+```
+
+This one Redis command does three things:
+
+- **`nx=True`** sets `delivery:{id}` only if it doesn't exist yet.
+- **`get=True`** returns the value that was there before, or `None` if there was none.
+- **`ex=...`** gives the claim the same 24 hours as the job.
+
+So `None` means "this request won", and anything else is the job ID that won earlier. Redis runs one command at a time, so if two copies of a delivery arrive at the same moment, exactly one gets `None`. A separate "check, then set" would leave a gap in which both copies see no claim and both create a job. That gap is a race condition. Laravel's `Cache::add()`, which only stores a key that doesn't exist, is the same idea, and so is `Cache::lock()`.
+
+`NX` together with `GET` needs Redis 7.0 or later. The Compose image is `redis:7-alpine`, which was 7.4 when this was checked.
+
+A repeat must leave the claim alone. Without `NX`, `GET` would still report the earlier job, but the repeat's job ID would overwrite the claim. That job is never saved, so a third delivery would be pointed at a job that doesn't exist. `test_losing_claim_does_not_replace_the_winner` covers this. It was added after that exact break went unnoticed by the first set of tests.
+
+### Order inside the route
+
+**The claim comes after every filter.** A claim means "this delivery created a job". If ignored events claimed their IDs too, the claim would mean something weaker, and `test_ignored_event_does_not_claim_its_delivery` guards against that.
+
+**A missing delivery ID is a 400.** GitHub always sends one, and the request has already passed the signature check, so a missing header points to a broken sender rather than an attacker. Ignored events don't need one, because they create nothing.
+
+**A duplicate gets a 200, not a 202.** Nothing new was accepted. The body still names the original job, so whoever redelivered can follow it.
+
+**A failed save releases the claim.** If saving the job raises, the `except` block deletes the claim and re-raises, so the request still fails with a 500. Without the release, the delivery would stay claimed by a job that doesn't exist, and a redelivery would be told it was a duplicate. `raise` with no argument re-raises the exception currently being handled, like `throw $e;` inside a PHP `catch`.
+
+### One Redis client for the app: `lifespan`
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.redis = aioredis.from_url(get_settings().redis_url)
+    yield
+    await app.state.redis.aclose()
+
+app = FastAPI(..., lifespan=lifespan)
+```
+
+FastAPI runs the code before `yield` once at startup and the code after it once at shutdown. One client holds a pool of connections that all requests share, rather than each request connecting on its own as the `/health` check does. `app.state` is a place to hang shared objects on the app. The nearest Laravel idea is binding a singleton in a service provider's `register` method.
+
+`@asynccontextmanager` turns a generator function, one that uses `yield`, into an object with a start and an end, which is what FastAPI expects for `lifespan`. pytest fixtures with `yield` work the same way.
+
+### The store as a dependency
+
+```python
+def get_job_store(request: Request) -> JobStore:
+    return JobStore(request.app.state.redis)
+```
+
+The route asks for `store: JobStore = Depends(get_job_store)`, the same way it asks for settings. Tests replace it with `app.dependency_overrides[get_job_store]`, which matters here because `httpx`'s `ASGITransport` doesn't run the lifespan, so `app.state.redis` doesn't exist in tests. Instead, each test passes a store built on its own Redis client. That also keeps each client on the event loop of the test that created it, since pytest-asyncio gives every test a new loop.
+
+The lifespan is covered by a manual check instead, recorded below.
+
+### Tests
+
+The tests use the real Redis container. `deliver()` sends a fresh `test-<uuid>` delivery ID unless a test passes its own. Passing `delivery=None` leaves the header out. An autouse fixture overrides the store and, afterwards, deletes every `delivery:test-*` claim along with the job it points to. `redis_client` moved to `tests/conftest.py`, because both test files use it.
+
+`test_failed_save_releases_the_claim` uses a `FailingStore` subclass whose `save` raises. `ASGITransport` passes app errors through to the test rather than turning them into a 500, so the test expects the exception itself.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
-- **Accepted jobs go nowhere yet.** The route returns a new `job_id` with status `queued`, but nothing is saved or queued, so that ID can't be looked up and the status is only a promise. The job store from step 2.5 exists but isn't called yet. Steps 2.6 and 2.7 connect it.
+- **Accepted jobs aren't queued yet.** Each accepted job is saved in Redis as `queued`, but nothing is published to RabbitMQ, so no worker ever picks it up. Step 2.7 adds that, and step 2.8 adds the API to look a job up.
 - **The local allowlist is empty.** `REVIEW_REPOSITORIES` is `""` in the local `.env`, so every event is ignored until a real repository is added for step 2.11.
 - **The allowlist only reads from the environment.** Step 4.10 adds the database as a source.
 - **A misspelled name fails silently.** The event is ignored with a 200, and nothing warns that the value doesn't match a real repository.
-- **Repeated deliveries get a second job ID.** Step 2.6 adds deduplication.
-- **A valid request can be replayed.** The signature doesn't cover a timestamp, so a captured request stays valid. Step 2.6 will catch repeats of the same delivery ID.
-- **Nothing uses the schemas yet.** The route, job store, and worker arrive in later steps, and they may show that a field is missing.
+- **A valid request can be replayed.** The signature covers only the body, not the headers or a timestamp, so a captured request stays valid. Deduplication catches an exact copy for 24 hours, but the `X-GitHub-Delivery` header isn't signed, so a replay with a new ID gets through. It handles redeliveries, not attacks.
+- **The same commit can be reviewed twice.** Deduplication is per delivery. Two different events for the same head commit, such as a quick close and reopen, each create a job.
+- **Redis is required to accept a job.** If Redis is down, the route fails with a 500, and the delivery has to be sent again once Redis is back.
+- **The worker doesn't use the schemas yet.** The route and job store now use `JobStatusDetails`, and the worker in step 2.10 may show that a field is missing.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
 - **Saves can overwrite each other.** `save` replaces the whole record, so if two writers load, change, and save the same job, the later save wins and the earlier change is lost. Only the worker changes a job after it is created, so this isn't expected to happen yet.
 - **Redis isn't durable storage.** If Redis restarts without persistence, or a job is older than 24 hours, the record is gone. Lasting results belong in Postgres, which Units 3 and 4 add.
@@ -225,7 +305,9 @@ class JobStore:
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
 
-Step 2.5, on 2026-11-02: 80 passed, and the new tests failed first because `src/cache.py` didn't exist. Five deliberate breaks were each caught and then reverted: no expiry, a 12-hour expiry, a different key prefix, no check for a missing key, and storing a Python repr instead of JSON. No `job:*` keys were left in Redis after the run.
+Step 2.6, on 2026-11-02: 92 passed. The new tests failed first, because `claim_delivery` and `get_job_store` didn't exist. Seven deliberate breaks were each caught and then reverted: never detecting duplicates, not releasing the claim after a failed save, no missing-ID check, not saving the job, a claim without an expiry, a claim without `NX`, and claiming before the filters. The `NX` break passed the first set of tests, which is why `test_losing_claim_does_not_replace_the_winner` was added. A temporary server in the `api` container, with a test allowlist, checked the lifespan: the first signed delivery gave 202, the repeat gave 200 `duplicate` with the same job ID, both keys had a TTL of 86400, and shutdown completed. The test keys were deleted, and no `test-*` keys were left in Redis.
+
+Step 2.5, same day: 80 passed, and the new tests failed first because `src/cache.py` didn't exist. Five deliberate breaks were each caught and then reverted: no expiry, a 12-hour expiry, a different key prefix, no check for a missing key, and storing a Python repr instead of JSON. No `job:*` keys were left in Redis after the run.
 
 Step 2.13, on 2026-11-01: 73 passed with no warnings. Four deliberate breaks were each caught and then reverted: no allowlist check, treating an empty list as allow-all, case-sensitive matching, and not trimming spaces.
 

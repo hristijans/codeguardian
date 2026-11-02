@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 2.6 Delivery deduplication.** Unit 2 is under way. The job store exists, and 2.6 is where the webhook route starts saving jobs.
+**Next step: 2.7 RabbitMQ publisher `src/queue.py`.** Unit 2 is under way. Accepted jobs are saved in Redis and deduplicated, but not yet queued.
 
 ## How to use this plan
 
@@ -49,7 +49,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 2.4 | Webhook route with event filtering | 202 for accepted actions, no job for others, `ping` handled | ✅ |
 | 2.13 | Repository allowlist from env | `REVIEW_REPOSITORIES` decides which repos are reviewed, others create no job, and nothing is hardcoded | ✅ |
 | 2.5 | Redis job store `src/cache.py` | Records save and read back with a 24-hour expiry | ✅ |
-| 2.6 | Delivery deduplication | A repeated `X-GitHub-Delivery` creates no second job | ⬜ |
+| 2.6 | Delivery deduplication | A repeated `X-GitHub-Delivery` creates no second job | ✅ |
 | 2.7 | RabbitMQ publisher `src/queue.py` | Persistent message reaches the durable queue | ⬜ |
 | 2.8 | `GET /api/v1/jobs/{job_id}` | Returns a job, and 404 when unknown | ⬜ |
 | 2.9 | GitHub client `src/github.py` | Diff fetch works against a mocked API | ⬜ |
@@ -137,3 +137,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-01: Added the webhook route with signature check first, then event and action filtering: 65 passed, and checked against the running API (step 2.4). Accepted jobs aren't stored yet. Next: step 2.13.
 - 2026-11-01: Added the `REVIEW_REPOSITORIES` allowlist, with empty meaning nothing is reviewed: 73 passed (step 2.13). Next: step 2.5.
 - 2026-11-02: Added the Redis job store in `src/cache.py`, with one JSON record per job and a 24-hour expiry set in the same command: 80 passed, and five deliberate breaks were caught (step 2.5). The route doesn't save jobs yet. Next: step 2.6.
+- 2026-11-02: The webhook route now saves accepted jobs and claims each delivery ID with one `SET NX GET`, so a repeat returns the original job: 92 passed, seven deliberate breaks caught, and the lifespan checked against a temporary server (step 2.6). GitHub reusing the ID on redelivery is still to be confirmed at 2.11. Next: step 2.7.

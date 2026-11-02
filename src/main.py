@@ -1,6 +1,8 @@
 import asyncio
 import uuid
-from typing import Dict, Any, Optional, Union
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import AsyncIterator, Dict, Any, Optional, Union
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, status, Response
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -9,17 +11,33 @@ from sqlalchemy import text
 import redis.asyncio as aioredis
 import aio_pika
 
+from src.cache import JobStore
 from src.config import Settings, get_settings
 from src.github import verify_signature
-from src.schemas import JobResponse, JobStatus, PRWebhookPayload
+from src.schemas import JobResponse, JobStatus, JobStatusDetails, PRWebhookPayload
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Code before `yield` runs once at startup, and code after it at shutdown.
+    # One shared client keeps a pool of connections, instead of each request
+    # opening its own. Creating it doesn't connect yet.
+    app.state.redis = aioredis.from_url(get_settings().redis_url)
+    yield
+    await app.state.redis.aclose()
+
 
 app = FastAPI(
     title="CodeGuardian AI API",
     description="Autonomous Multi-Agent Code Review & Security Audit Pipeline",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
 REVIEWED_ACTIONS = {"opened", "reopened", "synchronize"}
+
+
+def get_job_store(request: Request) -> JobStore:
+    return JobStore(request.app.state.redis)
 
 
 async def check_postgres(settings: Settings) -> Dict[str, Any]:
@@ -104,7 +122,9 @@ async def github_webhook(
     response: Response,
     x_github_event: Optional[str] = Header(default=None),
     x_hub_signature_256: Optional[str] = Header(default=None),
+    x_github_delivery: Optional[str] = Header(default=None),
     settings: Settings = Depends(get_settings),
+    store: JobStore = Depends(get_job_store),
 ) -> Union[JobResponse, Dict[str, str]]:
     # The body is read by hand because a Pydantic parameter would parse it
     # before the signature check, and the check needs the exact bytes.
@@ -135,5 +155,37 @@ async def github_webhook(
         response.status_code = status.HTTP_200_OK
         return {"status": "ignored"}
 
-    # The job isn't saved or queued yet. Steps 2.5 and 2.7 add that here.
-    return JobResponse(job_id=str(uuid.uuid4()), status=JobStatus.QUEUED)
+    # Checked only now, so that ignored events don't need one.
+    if not x_github_delivery:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing delivery ID")
+
+    # A redelivery, sent by hand or through GitHub's API, reuses the original
+    # delivery ID. Claiming the ID before saving means a repeat finds the claim
+    # and creates nothing.
+    job_id = str(uuid.uuid4())
+    existing_job_id = await store.claim_delivery(x_github_delivery, job_id)
+    if existing_job_id is not None:
+        response.status_code = status.HTTP_200_OK
+        return {"status": "duplicate", "job_id": existing_job_id}
+
+    now = datetime.now(timezone.utc)
+    job = JobStatusDetails(
+        job_id=job_id,
+        status=JobStatus.QUEUED,
+        repo_name=payload.repository.full_name,
+        pr_number=payload.pull_request.number,
+        head_sha=payload.pull_request.head.sha,
+        title=payload.pull_request.title,
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        await store.save(job)
+    except Exception:
+        # Without this, a redelivery would be called a duplicate of a job that
+        # was never saved. The error still reaches the caller as a 500.
+        await store.release_delivery(x_github_delivery)
+        raise
+
+    # The job isn't queued yet. Step 2.7 publishes it to RabbitMQ here.
+    return JobResponse(job_id=job_id, status=JobStatus.QUEUED)
