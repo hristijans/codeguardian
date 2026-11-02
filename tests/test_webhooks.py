@@ -444,3 +444,17 @@ async def test_failed_publish_marks_the_job_failed_and_releases_the_claim(
     finally:
         # The released claim no longer points here, so the fixture can't.
         await redis_client.delete(job_key(job_id))
+
+
+@pytest.mark.asyncio
+async def test_accepted_job_can_be_looked_up(
+    async_client: AsyncClient, raw_payload: dict
+):
+    response = await deliver(async_client, json.dumps(raw_payload).encode())
+    job_id = response.json()["job_id"]
+
+    lookup = await async_client.get(f"/api/v1/jobs/{job_id}")
+
+    assert lookup.status_code == 200
+    assert lookup.json()["status"] == "queued"
+    assert lookup.json()["pr_number"] == raw_payload["pull_request"]["number"]

@@ -1,6 +1,4 @@
 import uuid
-from datetime import datetime, timezone
-
 import pytest
 import pytest_asyncio
 
@@ -11,35 +9,6 @@ from src.schemas import JobStatus, JobStatusDetails
 @pytest.fixture
 def store(redis_client) -> JobStore:
     return JobStore(redis_client)
-
-
-@pytest_asyncio.fixture
-async def make_job(redis_client):
-    """Build job records, and delete their keys after the test.
-
-    Real Redis is shared with the running app, so only this test's keys go.
-    """
-    created: list[str] = []
-
-    def build(**changes) -> JobStatusDetails:
-        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-        fields = {
-            "job_id": str(uuid.uuid4()),
-            "status": JobStatus.QUEUED,
-            "repo_name": "example-org/example-repo",
-            "pr_number": 1,
-            "head_sha": "0" * 40,
-            "title": "Example change",
-            "created_at": now,
-            "updated_at": now,
-        }
-        fields.update(changes)
-        created.append(fields["job_id"])
-        return JobStatusDetails(**fields)
-
-    yield build
-    if created:
-        await redis_client.delete(*(job_key(job_id) for job_id in created))
 
 
 def test_key_uses_job_prefix():

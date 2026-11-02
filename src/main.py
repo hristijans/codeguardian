@@ -233,3 +233,22 @@ async def github_webhook(
         raise
 
     return JobResponse(job_id=job_id, status=JobStatus.QUEUED)
+
+
+@app.get(
+    "/api/v1/jobs/{job_id}",
+    response_model=JobStatusDetails,
+    tags=["Jobs"],
+)
+async def get_job(
+    job_id: uuid.UUID,
+    store: JobStore = Depends(get_job_store),
+) -> JobStatusDetails:
+    # Typing the path value as UUID makes FastAPI reject anything else with a
+    # 422 before this runs. str() gives the lowercase form the keys use, so an
+    # uppercase ID still finds its job.
+    job = await store.get(str(job_id))
+    if job is None:
+        # Unknown, or older than 24 hours. Redis can't tell the two apart.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Job not found")
+    return job

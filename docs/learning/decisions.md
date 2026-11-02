@@ -205,3 +205,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Sending only the job ID, which ties the worker to Redis, which isn't durable. Sending the whole `JobStatusDetails`, whose status and timestamps go stale. Publishing before saving, which lets a fast worker find no record. Ignoring the publish result, which loses jobs silently. Retrying the publish or an outbox table, which would survive broker outages but is more than this step needs; it's recorded as a known limitation. A named exchange, which only matters once a message must reach several queues.
 
 **Implemented:** Yes.
+
+## D21: Type the job ID in the path as a UUID (2026-11-02)
+
+**Decision:** `GET /api/v1/jobs/{job_id}` declares `job_id: uuid.UUID`, so anything that isn't a UUID gets a 422, and the lookup uses `str(job_id)`.
+
+**Why:** Job IDs are always `uuid4` values, so the type states the rule and FastAPI enforces it. Converting back with `str()` gives the stored lowercase form, so the ID's case doesn't matter.
+
+**Rejected:** A plain `str`, which sends any value to Redis and makes an uppercase ID a 404. Returning 404 for a malformed ID, which hides the difference between "no such job" and "that isn't a job ID".
+
+**Implemented:** Yes.
