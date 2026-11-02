@@ -175,3 +175,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 **Rejected:** Treating empty as "review everything", which is the riskier failure. Making the setting required, because the app can run safely without it. A `list[str]` field, because pydantic-settings reads it as JSON from the environment, and a comma-separated value is easier to write.
 
 **Implemented:** Yes.
+
+## D18: Store each job as one JSON string in Redis (2026-11-02)
+
+**Decision:** `src/cache.py` saves each job as a JSON string under `job:{job_id}` with `SET ... EX 86400`, and reads it back through `JobStatusDetails`.
+
+**Why:** The whole record is always read and written together, and one `SET` stores the value and its expiry at once. Pydantic already turns the model into JSON and back, with validation on the way out.
+
+**Rejected:** A Redis hash per job, which allows updating one field without rewriting the rest, but stores every value as a string and needs a separate `EXPIRE` call. The RedisJSON module, which the standard Redis image doesn't include. Postgres, which is the place for lasting results but is more than short-lived status needs.
+
+**Implemented:** Yes. The route doesn't call it yet.

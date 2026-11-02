@@ -2,7 +2,7 @@
 
 Unit 2 connects the app to GitHub. It receives webhook events, turns them into jobs, and fetches the pull request diff. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`
+**Files so far:** `src/config.py`, `src/schemas.py`, `src/github.py`, `src/main.py`, `.env.example`, `tests/test_schemas.py`, `tests/test_signature.py`, `tests/test_webhooks.py`, `tests/fixtures/pull_request_opened.json`, `src/cache.py`, `tests/test_cache.py`
 
 ## GitHub settings
 
@@ -166,10 +166,50 @@ def review_repositories(self) -> set[str]:
 
 The order has its own tests. A bad signature on a body that isn't JSON must give 401, because a 422 would mean untrusted data was parsed. A body with unusual spacing must give 202, which would fail if the route re-encoded it before checking.
 
+## Job store: `src/cache.py`
+
+The job store keeps the current status of each job in Redis, so the API can answer "what happened to job X?" while the worker does the review elsewhere. It isn't connected to the route yet. Step 2.6 starts saving accepted jobs, and step 2.8 reads them back.
+
+```python
+JOB_TTL_SECONDS = 24 * 60 * 60
+
+def job_key(job_id: str) -> str:
+    return f"job:{job_id}"
+
+class JobStore:
+    def __init__(self, redis: aioredis.Redis) -> None:
+        self._redis = redis
+
+    async def save(self, job: JobStatusDetails) -> None:
+        await self._redis.set(
+            job_key(job.job_id), job.model_dump_json(), ex=JOB_TTL_SECONDS
+        )
+
+    async def get(self, job_id: str) -> Optional[JobStatusDetails]:
+        raw = await self._redis.get(job_key(job_id))
+        if raw is None:
+            return None
+        return JobStatusDetails.model_validate_json(raw)
+```
+
+**One JSON string per job.** `model_dump_json()` turns the Pydantic model into JSON, including the `datetime` fields and the `JobStatus` enum, and `model_validate_json()` turns it back and validates it. Reading it back through the model means a corrupt or outdated record fails loudly, rather than reaching the API as a half-filled dict. In Laravel terms, this is `Cache::put("job:$id", $job->toJson(), now()->addDay())` with a typed DTO on the way out.
+
+**The expiry is set in the same command.** `set(..., ex=...)` stores the value and its expiry at once. A separate `expire` call afterwards could be skipped if the app crashed in between, leaving a key that never expires. Every save restarts the 24 hours, so a job expires a day after its last change, not a day after it was created.
+
+**The client is passed in.** `JobStore` takes a Redis client instead of creating one. The app will create one client and share it, and the tests pass their own. It's the same idea as Laravel's constructor injection: the class says what it needs, and something else builds it.
+
+**`job_key` is a function.** The `job:` prefix is used in the store, in the tests, and later by anything that inspects Redis, so it lives in one place. The `job:{job_id}:stream` key in Unit 5 will follow the same scheme.
+
+**`_redis` has a leading underscore.** Python has no `private`. The underscore is a convention meaning "internal, don't use from outside", which tools and readers respect but the language doesn't enforce.
+
+### Tests
+
+`tests/test_cache.py` runs against the real Redis container, not a fake, because the expiry is the behaviour under test and a fake would only show that the fake works. The `make_job` fixture builds records with random IDs and deletes their keys afterwards, so tests don't see each other's data and nothing is left in the Redis the running app uses. A fixture can hand back a function, as `make_job` does. That is pytest's version of a Laravel model factory.
+
 ## Known limitations
 
 - **The local `.env` holds placeholders.** Both values are `change-me` until a real token and webhook exist, which step 2.11 needs. `change-me` is a public value, so once the route exists, anyone reaching it could sign with it until a real secret is set.
-- **Accepted jobs go nowhere yet.** The route returns a new `job_id` with status `queued`, but nothing is saved or queued, so that ID can't be looked up and the status is only a promise. Steps 2.5 and 2.7 connect it.
+- **Accepted jobs go nowhere yet.** The route returns a new `job_id` with status `queued`, but nothing is saved or queued, so that ID can't be looked up and the status is only a promise. The job store from step 2.5 exists but isn't called yet. Steps 2.6 and 2.7 connect it.
 - **The local allowlist is empty.** `REVIEW_REPOSITORIES` is `""` in the local `.env`, so every event is ignored until a real repository is added for step 2.11.
 - **The allowlist only reads from the environment.** Step 4.10 adds the database as a source.
 - **A misspelled name fails silently.** The event is ignored with a 200, and nothing warns that the value doesn't match a real repository.
@@ -177,13 +217,17 @@ The order has its own tests. A bad signature on a body that isn't JSON must give
 - **A valid request can be replayed.** The signature doesn't cover a timestamp, so a captured request stays valid. Step 2.6 will catch repeats of the same delivery ID.
 - **Nothing uses the schemas yet.** The route, job store, and worker arrive in later steps, and they may show that a field is missing.
 - **Status changes aren't checked.** `JobStatus` lists valid states, but nothing stops a jump such as `completed` back to `queued`.
+- **Saves can overwrite each other.** `save` replaces the whole record, so if two writers load, change, and save the same job, the later save wins and the earlier change is lost. Only the worker changes a job after it is created, so this isn't expected to happen yet.
+- **Redis isn't durable storage.** If Redis restarts without persistence, or a job is older than 24 hours, the record is gone. Lasting results belong in Postgres, which Units 3 and 4 add.
 - **Only the GitHub secrets are hidden.** The Postgres and RabbitMQ passwords are still plain strings, so they still print with the settings object.
 
 ## Verification record
 
 Checked on 2026-11-01 in the `api` container: `docker compose exec -T api python -m pytest -q` gave 13 passed, and `.env` is ignored by Git. The three new test cases failed before the fields existed.
 
-Step 2.13, same day: 73 passed with no warnings. Four deliberate breaks were each caught and then reverted: no allowlist check, treating an empty list as allow-all, case-sensitive matching, and not trimming spaces.
+Step 2.5, on 2026-11-02: 80 passed, and the new tests failed first because `src/cache.py` didn't exist. Five deliberate breaks were each caught and then reverted: no expiry, a 12-hour expiry, a different key prefix, no check for a missing key, and storing a Python repr instead of JSON. No `job:*` keys were left in Redis after the run.
+
+Step 2.13, on 2026-11-01: 73 passed with no warnings. Four deliberate breaks were each caught and then reverted: no allowlist check, treating an empty list as allow-all, case-sensitive matching, and not trimming spaces.
 
 Step 2.4, same day: 65 passed with no warnings. Five deliberate breaks were each caught and then reverted: no signature check, re-encoding the body, no event filter, no action filter, and a fixed job ID. In the running API, a signed event returned 202, a forged one 401, and a `push` event 200.
 

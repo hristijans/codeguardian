@@ -70,6 +70,8 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **Laravel equivalent:** The `Redis` facade.
 
+**Where it is used:** The `/health` check, and the job store in `src/cache.py`, which uses `set(..., ex=...)` and `get`. `get` returns bytes, which Pydantic's `model_validate_json` accepts directly, so the client doesn't need `decode_responses=True`.
+
 ### aio-pika
 
 **What it does:** Async RabbitMQ client that speaks AMQP 0-9-1.
