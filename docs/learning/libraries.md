@@ -138,6 +138,18 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **Where it is used:** Only `src/agent/llm.py`. A test in `tests/test_llm.py` fails if any other file in `src/` imports it.
 
+### langgraph
+
+**What it does:** Builds an LLM workflow as a graph. Nodes are functions that read the state and return changes, and edges decide which node runs next. It merges each node's changes into the state, runs nodes in parallel when the edges allow, and in Unit 4 saves the state between steps (`langgraph-checkpoint`, 4.3.1, is installed with it).
+
+**Why it is used:** It's the subject of the curriculum, and its explicit graph makes each step of a review visible and testable. It's added in step 3.3, earlier than the graph itself in step 3.7, because the reducer tests need a real graph to show that the state merges findings correctly.
+
+**Alternatives:** A plain `async` function calling the model, which is enough for one step but has no parallel nodes, checkpoints, or human-in-the-loop pauses, all of which Units 4 and 5 need. LangChain's older `AgentExecutor`, which is replaced by LangGraph. CrewAI or AutoGen, which hide more of the flow behind agent roles.
+
+**Laravel equivalent:** No direct match. It's closest to a job pipeline or `Bus::chain`, where each job hands its result on, but with a shared state, branching, and parallel steps.
+
+**Where it is used:** So far only `tests/test_agent_state.py`. `src/agent/state.py` defines the state it will use and doesn't import it.
+
 ## Development tools
 
 ### smee-client

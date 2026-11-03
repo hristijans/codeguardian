@@ -266,3 +266,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. No node uses it until step 3.4.
 
+## D27: A small, flat report schema that is strict on shape and lenient on case (2026-11-03)
+
+**Decision:** `CodeAuditReport` has a required `summary` and `overall_risk_score`, and two lists of the same `Finding` model, which defaults to empty. Levels are `StrEnum`s, normalized to uppercase before validation. `line` is optional and at least 1. Unknown keys are ignored. Every field has a description, because the schema is sent to the model. The graph state is the curriculum's `TypedDict`, with `operator.add` reducers on both finding lists, and it stores findings as JSON-mode dicts.
+
+**Why:** The reply is untrusted, so a wrong shape or an invented level must fail. Lowercase levels and extra keys are harmless, and failing a whole review over them would waste a minute of CPU time each time. A short, flat schema suits a 3B model. Dicts in the state keep it plain JSON for Unit 4's checkpoints.
+
+**Rejected:** `extra="forbid"`, which would reject harmless extra keys. Separate finding models for syntax and security issues, which have no different fields yet. A `confidence` or `cwe` field, which a small model would mostly guess. Severity as a free string, which the report couldn't sort or count reliably. A Pydantic model for the graph state, which LangGraph supports but which the curriculum doesn't ask for, and which validates every update. Storing `Finding` objects in the state, which wouldn't be plain JSON for checkpoints.
+
+**Implemented:** Yes. Nothing uses the schema until step 3.4.
+

@@ -2,7 +2,7 @@
 
 Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`
+**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`
 
 ## Reaching Ollama from the containers
 
@@ -141,6 +141,70 @@ Thirteen tests, counting each parametrized case. Twelve build the model without 
 
 The last test, under the `ollama` marker, makes a real call through the factory's model. `model_copy(update={"num_predict": 10})` makes a copy limited to 10 tokens. `.bind(num_predict=10)` doesn't work for this. `ChatOllama` reads options such as `num_predict` from its own fields, and passes extra keywords from `bind` straight to the `ollama` client, which raised `TypeError: AsyncClient.chat() got an unexpected keyword argument 'num_predict'` when tried. The copy produced exactly 10 output tokens.
 
+## The review the model returns: `src/agent/schemas.py`
+
+The LLM's answer has to be data the app can use, not free text. `CodeAuditReport` is a Pydantic model that describes that answer:
+
+```text
+CodeAuditReport
+├── summary                   str, required
+├── overall_risk_score        RiskLevel, required: LOW | MEDIUM | HIGH | CRITICAL
+├── syntax_issues             list[Finding], default []
+└── security_vulnerabilities  list[Finding], default []
+
+Finding
+├── file         str, required
+├── line         int ≥ 1, or null (default null)
+├── severity     Severity, required: LOW | MEDIUM | HIGH | CRITICAL
+├── title        str, required
+├── explanation  str, required
+└── suggestion   str or null (default null)
+```
+
+### The schema is part of the prompt
+
+From step 3.4, the node will call `model.with_structured_output(CodeAuditReport)`. With its default `method="json_schema"`, `ChatOllama` turns the class into a JSON schema with `CodeAuditReport.model_json_schema()` and sends it as Ollama's `format` option, which constrains the reply to JSON in that shape. The reply is then parsed back into a `CodeAuditReport`, so validation still runs. So every `Field(description=...)` is text the model reads, and that's why every field has one. A test checks that none is missing. This is different from a Laravel FormRequest, whose rules only check input after it arrives. Here the same class also tells the sender what to send.
+
+The fields are kept few and flat on purpose. A 3B model handles a short schema better than a deep one.
+
+### What is accepted and what is rejected
+
+The reply is untrusted, so it's validated like any request body, and anything that doesn't fit raises `ValidationError`:
+
+- **Required fields.** A report needs `summary` and `overall_risk_score`. A finding needs `file`, `severity`, `title`, and `explanation`. The lists default to empty, so a clean review can leave them out.
+- **Levels are a fixed set.** `Severity` and `RiskLevel` are `StrEnum`s, the same kind as `JobStatus` in Unit 2. `"SEVERE"` or `"URGENT"` is rejected.
+- **Levels ignore case.** Small models often write `"high"`. A `field_validator` with `mode="before"` runs before Pydantic checks the type, and turns any string into `value.strip().upper()`. A value that is still unknown afterwards fails the enum check as usual. The `@classmethod` under `@field_validator` is the form Pydantic expects: a validator belongs to the class, not to an instance.
+- **`line` must be 1 or more, or null.** `ge=1` means "greater than or equal to 1". Line numbers start at 1, so a `0` is a sign the model made the number up.
+- **Unknown keys are ignored.** Pydantic's default `extra="ignore"` drops a key such as `confidence` instead of failing the whole review over it.
+
+Two level enums with the same values look like duplication. They're kept apart because they mean different things, one finding and the whole pull request, and the schema shows the model both names.
+
+## The graph state: `src/agent/state.py`
+
+LangGraph passes one state dictionary through the graph. `PRAnalysisState` is a `TypedDict`, which is a type hint for a plain `dict` with known keys. At runtime it is just a dict: nothing is validated, unlike a Pydantic model. It holds the job's details, the diff, the findings, the risk score, and the finished report, the fields the curriculum lists.
+
+### Reducers
+
+A node doesn't return the whole state. It returns only the keys it changed, and LangGraph merges them in. For most keys, the new value replaces the old one. A key annotated with a **reducer** is combined with the old value instead:
+
+```python
+syntax_issues: Annotated[list[dict[str, Any]], operator.add]
+security_vulnerabilities: Annotated[list[dict[str, Any]], operator.add]
+```
+
+`Annotated[type, extra]` attaches extra information to a type hint without changing the type. LangGraph reads the extra, `operator.add`, which is the function behind `+`. For lists, `+` joins them, so `old + new` keeps every finding.
+
+This matters when nodes run in parallel, as the security and quality agents will in Unit 4. `tests/test_agent_state.py` builds a small graph where `START` leads to two nodes, `a` and `b`, which run in the same step:
+
+- Both add a finding to `security_vulnerabilities`, and the result holds the initial finding plus both new ones.
+- Both write `overall_risk_score`, which has no reducer, and LangGraph raises `InvalidUpdateError`: it can't tell which write should win, so it refuses to guess.
+
+The nearest Laravel idea is how `array_merge_recursive` and `array_merge` treat the same key differently, except here you choose the rule for each key.
+
+### Findings are stored as dicts
+
+The lists hold plain dictionaries, made with `finding.model_dump(mode="json")`, not `Finding` objects. `mode="json"` turns the enums into plain strings such as `"HIGH"`. Plain JSON keeps the state easy to store, and Unit 4 saves every state to Postgres as a checkpoint. The node that calls the LLM does this conversion, in step 3.4.
+
 ## Known limitations
 
 - **Ollama is reachable from the local network.** It listens on all interfaces, the firewall is inactive, and Ollama's API has no authentication. Anyone on the same network can run, pull, or delete models. The fix is a firewall rule that allows only Docker's networks to reach port 11434. It isn't applied yet.
@@ -149,6 +213,9 @@ The last test, under the `ollama` marker, makes a real call through the factory'
 - **Speed was measured once, with one prompt.** Real diffs are longer, and the prompt part grows with them.
 - **Only one provider exists.** The factory's shape for a second provider is untested. A cloud provider would also need its API key in the settings as a `SecretStr`.
 - **The import guard only sees direct imports.** Code that loads a module by name, such as `importlib.import_module("langchain_ollama")`, or that gets a provider class through another module, would pass it.
+- **The state isn't validated.** `PRAnalysisState` is only a type hint. A node that returns a misspelled key, or a `Finding` object instead of a dict, isn't caught at runtime.
+- **The model may leave `line` empty.** In a first informal try, `llama3.2` filled the schema correctly but gave `line: null` for a problem on a line it could have worked out from the diff. The prompt in step 3.4 may need to explain how to read line numbers from the `@@` headers.
+- **Text fields have no length limits.** A model could return a very long `explanation`. Whether limits are needed is left until real reviews in step 3.9.
 - **Configuration errors appear late.** A wrong `LLM_PROVIDER` raises on the first `get_chat_model()` call, not when the app starts, and a wrong model name only on the first LLM call.
 
 ## Verification record
@@ -156,3 +223,5 @@ The last test, under the `ollama` marker, makes a real call through the factory'
 Step 3.1, on 2026-11-02: the four tests in `tests/test_ollama.py` failed first with `Temporary failure in name resolution`. After adding `extra_hosts` and recreating `api` and `worker`, both containers resolved `host.docker.internal` to `172.17.0.1`, and the four tests passed in 5.3 seconds. A deliberate break, `LLM_MODEL=not-a-pulled-model`, failed the two model tests and left the two connection tests passing. From the worker container, `llama3.2` answered a 49-token review prompt with 300 tokens at 6.0 tokens/s, 54.1 seconds in total, and named the SQL injection. Full suite: 155 passed, and 151 passed with `-m "not ollama"`.
 
 Step 3.2, on 2026-11-03: `tests/test_llm.py` failed first on `No module named 'langchain_core'`. After adding `langchain-core` and `langchain-ollama` (1.7.4 and 1.1.0 installed) and rebuilding, its 13 tests passed. Six deliberate breaks each failed at least one test: removing `temperature=0`, removing the timeout, removing `.strip().lower()`, falling back to Ollama for unknown providers, hardcoding the model name, and importing `ChatOllama` in `src/worker.py`. Running with `LLM_MODEL=not-a-pulled-model` failed only the real-call test. Full suite: 168 passed, and 163 passed with `-m "not ollama"`.
+
+Step 3.3, on 2026-11-03: `tests/test_agent_state.py` failed first on the missing `langgraph` package, then on the missing `src.agent.schemas`. After adding `langgraph` (1.2.19) and writing the two modules, its 20 tests passed. Seven deliberate breaks each failed at least one test: removing the reducer from `security_vulnerabilities`, removing the level normalizing, removing `ge=1`, making `summary` optional, removing one field description, setting `extra="forbid"`, and dropping the `CRITICAL` level. An informal live check, not part of the tests: `llama3.2` with `with_structured_output(CodeAuditReport)` and a one-line system prompt returned a valid report for a three-line SQL injection diff in 23 seconds, with risk `HIGH`, one `CRITICAL` finding, and `line: null`. Full suite: 188 passed, and 183 passed with `-m "not ollama"`.

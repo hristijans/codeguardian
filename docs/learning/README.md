@@ -12,7 +12,7 @@ This folder is the long-term reference for everything built in CodeGuardian: wha
 | [libraries.md](libraries.md) | Why a library is used and what it does |
 | [unit-1-infrastructure.md](unit-1-infrastructure.md) | How the Docker setup, config, health checks, and tests work |
 | [unit-2-github-ingestion.md](unit-2-github-ingestion.md) | How GitHub events reach the app and become jobs |
-| [unit-3-single-agent.md](unit-3-single-agent.md) | How the containers reach the local LLM, how the chat model is chosen, and later how the review agent works |
+| [unit-3-single-agent.md](unit-3-single-agent.md) | How the containers reach the local LLM, how the chat model is chosen, what the review report and graph state look like, and later how the review agent works |
 
 ## How these notes are maintained
 
