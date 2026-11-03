@@ -139,6 +139,7 @@ def test_state_has_the_expected_fields():
         "diff_truncated",
         "syntax_issues",
         "security_vulnerabilities",
+        "analysis_summary",
         "overall_risk_score",
         "final_summary",
     }

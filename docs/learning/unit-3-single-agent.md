@@ -2,7 +2,7 @@
 
 Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`
+**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`
 
 ## Reaching Ollama from the containers
 
@@ -181,7 +181,7 @@ Two level enums with the same values look like duplication. They're kept apart b
 
 ## The graph state: `src/agent/state.py`
 
-LangGraph passes one state dictionary through the graph. `PRAnalysisState` is a `TypedDict`, which is a type hint for a plain `dict` with known keys. At runtime it is just a dict: nothing is validated, unlike a Pydantic model. It holds the job's details, the diff, the findings, the risk score, and the finished report, the fields the curriculum lists.
+LangGraph passes one state dictionary through the graph. `PRAnalysisState` is a `TypedDict`, which is a type hint for a plain `dict` with known keys. At runtime it is just a dict: nothing is validated, unlike a Pydantic model. It holds the job's details, the diff, the findings, the risk score, and the finished report, the fields the curriculum lists. Step 3.4 added one more, `analysis_summary`, for the model's own short summary, because `final_summary` is the finished Markdown report that `format_report_node` writes.
 
 ### Reducers
 
@@ -205,6 +205,94 @@ The nearest Laravel idea is how `array_merge_recursive` and `array_merge` treat 
 
 The lists hold plain dictionaries, made with `finding.model_dump(mode="json")`, not `Finding` objects. `mode="json"` turns the enums into plain strings such as `"HIGH"`. Plain JSON keeps the state easy to store, and Unit 4 saves every state to Postgres as a checkpoint. The node that calls the LLM does this conversion, in step 3.4.
 
+## The analysis node: `src/agent/nodes.py`
+
+`analyze_diff_node` is the step that asks the model for a review. It reads the diff from the state, sends it with a system prompt, gets back a validated `CodeAuditReport`, and returns the parts of the state it owns.
+
+```text
+state ──▶ empty diff? ──yes──▶ LOW report, no model call
+              │ no
+              ▼
+        build_messages(state) ──▶ reviewer.ainvoke(...) ──▶ CodeAuditReport
+                                         │ bad reply                │
+                                         ▼                          ▼
+                                   AnalysisError       _to_update(report) ──▶ {analysis_summary, overall_risk_score,
+                                                                               syntax_issues, security_vulnerabilities}
+```
+
+### Passing the model in: `make_analyze_diff_node(model)`
+
+A LangGraph node is called with the state and nothing else, so the node can't take the model as an argument. Instead, `make_analyze_diff_node(model)` takes the model and returns the node, an inner function that can still see `model` after the outer function returns. That inner function is a **closure**. In PHP terms it's `function () use ($model) { ... }`.
+
+```python
+def make_analyze_diff_node(model: BaseChatModel) -> Node:
+    reviewer = model.with_structured_output(CodeAuditReport)
+
+    async def analyze_diff_node(state: PRAnalysisState) -> dict[str, Any]:
+        ...
+        report = await reviewer.ainvoke(build_messages(state))
+        return _to_update(report)
+
+    return analyze_diff_node
+```
+
+The graph builder (step 3.7) will call `make_analyze_diff_node(get_chat_model())`, and tests call it with a fake. This is constructor injection without a class. `with_structured_output` runs once, when the node is built, not on every review. `Node` is a type alias for "an async function from state to a dict".
+
+### The messages
+
+`build_messages(state)` returns two messages:
+
+1. A `SystemMessage` with `SYSTEM_PROMPT`: the reviewer's job, how to read a diff, and the rules for the report.
+2. A `HumanMessage` with the repository, the PR number, the title between `<title>` tags, and the diff, unchanged, between `<diff>` tags.
+
+The tags mark where the pull request's own text starts and ends. Step 3.5 builds on them with the rule that nothing inside them is an instruction. The title is inside tags too, because the PR's author writes it just like the diff.
+
+### How the prompt was chosen
+
+The prompt was tried against `llama3.2` with the two fixture diffs, one SQL injection and one clean change. These were single runs at `temperature=0`, so they show a direction, not a measurement:
+
+| Prompt | SQL injection diff | Clean diff |
+|---|---|---|
+| A one-line system prompt (step 3.3) | 1 finding, `CRITICAL`, 23 s | not tried |
+| First version, with a "Look for" checklist of vulnerability types and "clear code-quality problems" | injection rated `MEDIUM`, plus 4 low-value findings, one of them false, 387 tokens, 85 s | not tried |
+| The same, telling it to skip style and docs | injection `MEDIUM`, plus 3 vague findings | **6 invented findings**, each copied from the checklist (path traversal, template injection, ...) |
+| Final: no checklist, "most pull requests have none, and empty lists are a good answer" | 1 finding, `HIGH`, 90 tokens, 46 s | 2 low-grade false positives |
+
+The lesson: a small model treats a list of examples in the prompt as a list of things to report. Saying that "no problems" is a normal answer helped more than describing what to look for. Shorter replies also make reviews faster, because on this CPU almost all the time is spent writing the reply, about 5 tokens per second. Reading the prompt took 0.2 seconds of the 85.
+
+`line` was `null` in every run, even with the prompt explaining how to count from the `@@` header. Step 3.11 is planned to number the added lines in code, before the diff is sent.
+
+### What the node returns
+
+`_to_update(report)` turns the report into a state update with `model_dump(mode="json")`, so the findings are plain dicts with plain-string levels (see "Findings are stored as dicts"). It returns only the four keys this node owns. Returning `job_id` or `diff_text` too would overwrite them for nothing, and a test checks that it doesn't.
+
+**The overall risk is never below the worst finding.** The model once rated a PR `MEDIUM` overall while its own finding was `HIGH`. `_overall_risk` takes the highest of the model's overall level and every finding's severity. Levels are strings, so plain `max()` would compare them alphabetically, and `"MEDIUM"` would beat `"CRITICAL"`. `max(levels, key=_LEVEL_ORDER.index)` compares their positions in `RiskLevel` instead, which lists them from LOW to CRITICAL. A `StrEnum` keeps its members in the order they're defined. The rule only raises the level: a model that says `HIGH` with only `LOW` findings keeps `HIGH`.
+
+### Failures
+
+- **An empty diff** (or one with only whitespace) skips the model and returns a `LOW` report with a fixed summary. That can happen when a PR's commits cancel each other out. It isn't verified which other PRs GitHub returns an empty diff for: a rename or a permission change still has header lines, so it isn't empty. Either way, a minute of CPU time would be wasted on nothing.
+- **An unusable reply** raises `AnalysisError`. When `ChatOllama`'s parser can't turn the reply into a `CodeAuditReport`, it raises `OutputParserException`, which LangChain makes a subclass of `ValueError`. The node catches that, and a plain `ValidationError` too, and raises its own error. `AnalysisError` is also a `ValueError`, so the worker's existing rule (D23) marks the job `failed` without retrying. Running the same diff again at `temperature=0` would most likely give the same bad reply.
+- **The message only names the error type.** The model's reply can quote the diff, and the message ends up in the job record and the logs. The original exception is kept as the cause through `raise ... from error`, so a traceback still shows it.
+- **A slow or unreachable model** isn't caught here. The timeout from step 3.2 raises an `httpx` error, which the worker treats as unexpected and retries once.
+
+## Tests: `tests/test_agent_nodes.py`
+
+**The fake model.** LangChain's own fake chat models raise `NotImplementedError` for `with_structured_output`, so the tests have a small `FakeStructuredModel`. Its `with_structured_output(schema)` returns a `RunnableLambda` (a plain function wrapped so it has `ainvoke`) that records the messages, then parses the canned JSON text into the schema, raising `OutputParserException` as the real parser does. Because the canned reply is text, the tests go through the same validation as a real reply. The fake doesn't inherit from `BaseChatModel`. Python only needs it to have the methods the node calls, which is called *duck typing*.
+
+The fixture diffs in `tests/fixtures/diffs/` are made up, with placeholder paths.
+
+Seventeen tests, counting each parametrized case. All but one use the fake:
+
+- The SQL injection reply becomes one security finding with `HIGH` risk, and the clean reply becomes empty lists with `LOW`.
+- Levels written in lowercase come out uppercase, as plain `str`, not enums.
+- The update has exactly the four keys.
+- The risk rule: `MEDIUM` with a `HIGH` finding becomes `HIGH`, `LOW` with a `CRITICAL` one becomes `CRITICAL`, `HIGH` with only `LOW` stays `HIGH`, and no findings keeps the model's level.
+- The model is asked once, for `CodeAuditReport`. The messages are system then human, the diff is unchanged between `<diff>` and `</diff>`, the title is included, and the system prompt explains `@@` line numbers.
+- Text that isn't JSON, a missing risk score, and an unknown level each raise `AnalysisError`, which is a `ValueError`, without the reply in its message.
+- An empty or whitespace-only diff makes no model call.
+
+The last test, under the `ollama` marker, runs the real model on the SQL injection diff and expects at least one security finding and a risk of `MEDIUM` or higher. It takes about 30 seconds. It doesn't test the clean diff, because the model's false positives there would make it fail.
+
 ## Known limitations
 
 - **Ollama is reachable from the local network.** It listens on all interfaces, the firewall is inactive, and Ollama's API has no authentication. Anyone on the same network can run, pull, or delete models. The fix is a firewall rule that allows only Docker's networks to reach port 11434. It isn't applied yet.
@@ -214,7 +302,10 @@ The lists hold plain dictionaries, made with `finding.model_dump(mode="json")`, 
 - **Only one provider exists.** The factory's shape for a second provider is untested. A cloud provider would also need its API key in the settings as a `SecretStr`.
 - **The import guard only sees direct imports.** Code that loads a module by name, such as `importlib.import_module("langchain_ollama")`, or that gets a provider class through another module, would pass it.
 - **The state isn't validated.** `PRAnalysisState` is only a type hint. A node that returns a misspelled key, or a `Finding` object instead of a dict, isn't caught at runtime.
-- **The model may leave `line` empty.** In a first informal try, `llama3.2` filled the schema correctly but gave `line: null` for a problem on a line it could have worked out from the diff. The prompt in step 3.4 may need to explain how to read line numbers from the `@@` headers.
+- **The model leaves `line` empty.** In the step 3.3 try and all three prompt versions in step 3.4, `llama3.2` gave `line: null`, even with the prompt explaining the `@@` headers. Step 3.11 is planned to number the lines in code.
+- **False positives on clean code.** The final prompt still gave the clean fixture diff two low-grade findings. Review quality is judged in step 3.9, and a bigger model may be the real fix.
+- **The prompt was tuned on two small diffs, one run each.** That's enough to spot the checklist problem, not to show the prompt is good. A repeatable comparison needs the evaluation suite in Unit 6.
+- **The diff isn't yet treated as untrusted.** It's between markers, but the prompt doesn't yet say that nothing inside them is an instruction, and there's no size limit. Both are step 3.5.
 - **Text fields have no length limits.** A model could return a very long `explanation`. Whether limits are needed is left until real reviews in step 3.9.
 - **Configuration errors appear late.** A wrong `LLM_PROVIDER` raises on the first `get_chat_model()` call, not when the app starts, and a wrong model name only on the first LLM call.
 
@@ -225,3 +316,5 @@ Step 3.1, on 2026-11-02: the four tests in `tests/test_ollama.py` failed first w
 Step 3.2, on 2026-11-03: `tests/test_llm.py` failed first on `No module named 'langchain_core'`. After adding `langchain-core` and `langchain-ollama` (1.7.4 and 1.1.0 installed) and rebuilding, its 13 tests passed. Six deliberate breaks each failed at least one test: removing `temperature=0`, removing the timeout, removing `.strip().lower()`, falling back to Ollama for unknown providers, hardcoding the model name, and importing `ChatOllama` in `src/worker.py`. Running with `LLM_MODEL=not-a-pulled-model` failed only the real-call test. Full suite: 168 passed, and 163 passed with `-m "not ollama"`.
 
 Step 3.3, on 2026-11-03: `tests/test_agent_state.py` failed first on the missing `langgraph` package, then on the missing `src.agent.schemas`. After adding `langgraph` (1.2.19) and writing the two modules, its 20 tests passed. Seven deliberate breaks each failed at least one test: removing the reducer from `security_vulnerabilities`, removing the level normalizing, removing `ge=1`, making `summary` optional, removing one field description, setting `extra="forbid"`, and dropping the `CRITICAL` level. An informal live check, not part of the tests: `llama3.2` with `with_structured_output(CodeAuditReport)` and a one-line system prompt returned a valid report for a three-line SQL injection diff in 23 seconds, with risk `HIGH`, one `CRITICAL` finding, and `line: null`. Full suite: 188 passed, and 183 passed with `-m "not ollama"`.
+
+Step 3.4, on 2026-11-03: `tests/test_agent_nodes.py` failed first on the missing `src.agent.nodes`, then its tests passed, including the real-model test in 109 seconds. Three prompt versions were compared on the two fixture diffs (see "How the prompt was chosen"). The overall-risk rule was added test-first after one run showed `MEDIUM` overall with a `HIGH` finding: its two new cases failed, then passed. Nine deliberate breaks each failed at least one test: checking the empty diff without `.strip()`, dumping without `mode="json"`, removing the risk rule, using plain `max()`, catching only `ValidationError`, putting the error text in the message, removing the `<diff>` markers, removing the `@@` hint, and returning an extra key. The first try at the `@@` break missed, because the edit left one `@@` in the prompt; with the whole hint removed, the test failed. Full suite: 205 passed in 35 seconds, the real-model test taking 30, and 199 passed with `-m "not ollama"`.

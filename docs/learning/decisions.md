@@ -276,3 +276,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Nothing uses the schema until step 3.4.
 
+## D28: Build nodes with the model passed in, and correct the risk in code (2026-11-03)
+
+**Decision:** `make_analyze_diff_node(model)` returns the node as a closure, calling `with_structured_output(CodeAuditReport)` once. The node skips the model for an empty diff, raises `AnalysisError` (a `ValueError`) for an unusable reply without quoting it, returns only its four keys, and raises the overall risk to at least the most severe finding. The model's summary goes into a new state field, `analysis_summary`. The system prompt is short, has no checklist of vulnerability types, and says that no findings is a normal answer.
+
+**Why:** A closure lets tests pass a fake model without patching, and keeps nodes free of `get_chat_model()` calls. A `ValueError` fits the worker's existing rule that job failures aren't retried. Anything code can check, such as the risk ordering, shouldn't be left to a 3B model. The prompt choice follows the runs recorded in the Unit 3 notes, where a checklist made the model report every item on it.
+
+**Rejected:** Calling `get_chat_model()` inside the node and patching it in tests, which hides the dependency. LangGraph's runtime context (`context_schema`, read through a `runtime` argument), which is the library's own way to pass things like a model to nodes, but makes a node harder to call on its own in a test. `include_raw=True`, which returns the raw reply beside the parsed one, and isn't needed until there's somewhere safe to keep raw replies. Retrying a bad reply, which at `temperature=0` would likely give the same reply. Reusing `final_summary` for the model's summary, which `format_report_node` will overwrite with the Markdown report. Asking the model to fix its own risk rating, which it was already asked to do.
+
+**Implemented:** Yes. Nothing runs the node outside tests until the graph in step 3.7.
+

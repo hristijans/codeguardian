@@ -27,6 +27,8 @@ class PRAnalysisState(TypedDict):
     syntax_issues: Annotated[list[dict[str, Any]], operator.add]
     security_vulnerabilities: Annotated[list[dict[str, Any]], operator.add]
 
+    # The model's own short summary, from `CodeAuditReport.summary`.
+    analysis_summary: str
     # A `RiskLevel` value: LOW, MEDIUM, HIGH, or CRITICAL.
     overall_risk_score: str
     # The finished Markdown report, written by `format_report_node`.

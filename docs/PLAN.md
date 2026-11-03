@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 3.4 `analyze_diff_node` with mocked-LLM tests.** Unit 3 is under way. `get_chat_model()` is the only way to get a chat model, and `CodeAuditReport` and `PRAnalysisState` are ready, with `llama3.2` already filling the report schema in one informal try. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
+**Next step: 3.5 Diff limits and prompt-injection handling.** Unit 3 is under way. `analyze_diff_node` works with a fake model and with `llama3.2`, which finds the fixture SQL injection in about 30 seconds but leaves `line` empty and reports small false positives on clean code. Step 3.11 was added to number the diff's lines in code. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
 
 ## How to use this plan
 
@@ -66,8 +66,9 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 3.1 | Ollama access from containers (`extra_hosts`) and chosen model | A test prompt gets a reply from inside a container | ✅ |
 | 3.2 | LLM factory `src/agent/llm.py` | Nodes get a model only through `LLM_PROVIDER` | ✅ |
 | 3.3 | State and report schemas | State has reducers, and `CodeAuditReport` validates | ✅ |
-| 3.4 | `analyze_diff_node` with mocked-LLM tests | SQL injection and clean diffs give the right structured output | ⬜ |
+| 3.4 | `analyze_diff_node` with mocked-LLM tests | SQL injection and clean diffs give the right structured output | ✅ |
 | 3.5 | Diff limits and prompt-injection handling | Oversized and instruction-bearing diffs behave as designed | ⬜ |
+| 3.11 | Number the diff's lines in code before review | Added lines carry their new-file line numbers in the prompt, and findings from the real model have `line` set | ⬜ |
 | 3.6 | `format_report_node` | Markdown report is produced | ⬜ |
 | 3.7 | Graph assembly `src/agent/graph.py` | Graph runs start to end with a mocked LLM | ⬜ |
 | 3.8 | Worker integration | A job's report is stored, with failures marked `failed` | ⬜ |
@@ -150,3 +151,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-02: Containers reach host Ollama through `extra_hosts: host-gateway`, with Ollama listening on all interfaces through a systemd drop-in, and `llama3.2` chosen: the new Ollama tests failed first on name resolution, then 4 passed, and a review-sized prompt from the worker took 54 seconds at 6 tokens/s (step 3.1). Added step 0.11 for the local-network exposure this showed. Next: step 3.2.
 - 2026-11-03: Added `get_chat_model()` in `src/agent/llm.py`, with a builder per provider, `temperature=0`, a new `LLM_TIMEOUT_SECONDS`, and an AST test that fails if any other `src/` file imports a provider package: 168 passed, six deliberate breaks caught (step 3.2). Next: step 3.3.
 - 2026-11-03: Added `CodeAuditReport` and `Finding` in `src/agent/schemas.py` and `PRAnalysisState` with `operator.add` reducers in `src/agent/state.py`, plus `langgraph`: 188 passed, seven deliberate breaks caught, and a two-node graph showed the reducer merging parallel findings and a plain field rejecting two writes (step 3.3). An informal try had `llama3.2` fill the schema in 23 seconds, but with `line: null`. Next: step 3.4.
+- 2026-11-03: Added `make_analyze_diff_node` in `src/agent/nodes.py`, with a fake structured-output model for tests, an `AnalysisError` that the worker treats as a job failure, a skip for empty diffs, and an overall risk raised to the worst finding: 205 passed, nine deliberate breaks caught (step 3.4). Three prompts were compared on two fixture diffs; a checklist of vulnerability types made `llama3.2` report the checklist, and the final short prompt found the injection in 90 tokens. Added `analysis_summary` to the state, and step 3.11 because `line` stayed null in every run. Next: step 3.5.
