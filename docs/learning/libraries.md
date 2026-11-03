@@ -112,6 +112,32 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **Laravel equivalent:** None, because normal PHP code does not have this async model.
 
+## LLM
+
+### langchain-core
+
+**What it does:** The base layer of LangChain: message types (`HumanMessage`, `AIMessage`), the `BaseChatModel` interface every chat model implements, and the "Runnable" methods on it such as `ainvoke`, `astream`, and `with_structured_output`.
+
+**Why it is used:** It gives the agent one interface for every provider, so nodes don't change when the model does. LangGraph, coming in step 3.7, builds on the same package. Listing it directly, instead of relying on `langchain-ollama` to pull it in, is because `src/agent/llm.py` imports it directly.
+
+**Alternatives:** Calling the Ollama HTTP API with `httpx`, as `tests/test_ollama.py` does. That's fine for a connection check, but structured output, retries, and swapping providers would all have to be written by hand. The full `langchain` package, which adds chains and agents this project gets from LangGraph instead.
+
+**Laravel equivalent:** The interface side of a driver-based manager, like `Illuminate\Contracts\Cache\Repository`. Laravel's AI SDK or Prism plays a similar role for LLMs.
+
+**Where it is used:** `src/agent/llm.py`, for the `BaseChatModel` return type.
+
+### langchain-ollama
+
+**What it does:** Provides `ChatOllama`, a `BaseChatModel` that talks to an Ollama server. Underneath it uses the official `ollama` Python package (0.6.3 installed with it), which uses `httpx`.
+
+**Why it is used:** It's LangChain's maintained Ollama integration and supports structured output, which step 3.4 needs.
+
+**Alternatives:** The older `ChatOllama` in `langchain-community`, which is deprecated in favour of this package. The `ollama` package on its own, which has no LangChain interface. Ollama's OpenAI-compatible endpoint through `langchain-openai`, which would make a later move to a cloud model look smaller, but loses Ollama-specific options such as `num_ctx`.
+
+**Laravel equivalent:** One concrete driver behind the manager, like the Redis cache driver.
+
+**Where it is used:** Only `src/agent/llm.py`. A test in `tests/test_llm.py` fails if any other file in `src/` imports it.
+
 ## Development tools
 
 ### smee-client

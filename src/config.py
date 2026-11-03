@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "ollama"
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
     LLM_MODEL: str = "llama3.2"
+    # How long one LLM call may take. A CPU-only review takes about a minute.
+    LLM_TIMEOUT_SECONDS: float = 300.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

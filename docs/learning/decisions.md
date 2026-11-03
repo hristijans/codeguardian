@@ -256,3 +256,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. The local-network exposure is a known limitation, not yet fixed.
 
+## D26: One LLM factory with a builder per provider, enforced by a test (2026-11-03)
+
+**Decision:** `src/agent/llm.py` has `get_chat_model(settings=None)`, which looks up `LLM_PROVIDER` (ignoring case and spaces) in a dictionary of builder functions and returns a `BaseChatModel`. An unknown provider raises `LLMConfigError`. Each builder imports its provider package inside the function. The Ollama builder sets `temperature=0` and a timeout from a new `LLM_TIMEOUT_SECONDS` setting (default 300). A test fails if any other file in `src/` imports a provider package.
+
+**Why:** Nodes depend only on LangChain's interface, so a cloud model is one builder and one setting away. Imports inside builders keep each provider's package optional. The timeout matters because the worker holds its message until the job ends, and a hung call would hold it forever. A test is the only way to keep "nodes never import a provider" true over time.
+
+**Rejected:** `langchain.chat_models.init_chat_model("ollama:llama3.2")`, which does the same job in one call but needs the full `langchain` package and hides the mapping this step is meant to show. An `if`/`elif` chain, which works but mixes the lookup with the building. `Literal["ollama"]` on `LLM_PROVIDER` in `Settings`, which would fail at startup but would put the provider list in two places. Caching one model with `lru_cache`, which saves nothing worth having, since building one is cheap. Checking the model exists when it's built (`validate_model_on_init=True`), which would make every build call Ollama.
+
+**Implemented:** Yes. No node uses it until step 3.4.
+
