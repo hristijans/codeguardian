@@ -2,7 +2,7 @@
 
 Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`
+**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`, `src/agent/graph.py`, `tests/test_agent_graph.py`
 
 ## Reaching Ollama from the containers
 
@@ -485,6 +485,26 @@ A finding's text came from a model reading an untrusted diff, and the Markdown w
 
 `tests/test_agent_report.py`, 14 tests: the node returns only `final_summary`, the details appear, security comes before other issues, severity ordering, missing line and suggestion, the no-findings text and no empty sections, the partial note shown and not shown, a truncated empty review not called clean, the automated footer, and the four cleaning cases above. Six deliberate breaks each failed a test: no HTML escaping, no mention defusing, no severity sort, backticks left in the path, no whitespace collapsing, and the clean message shown for a truncated review.
 
+## The graph: `src/agent/graph.py`
+
+```
+[START] -> analyze_diff -> format_report -> [END]
+```
+
+`build_graph(model=None)` makes a `StateGraph(PRAnalysisState)`, registers the two nodes under the names `analyze_diff` and `format_report`, joins them with `add_edge`, and returns `builder.compile()`. Compiling checks the blueprint, such as an edge that names a missing node, and gives a runnable object with `ainvoke(state)`. It returns the final state, so `result["final_summary"]` is the Markdown report. The nearest Laravel idea is a fixed `Pipeline` of two pipes, except each stage returns only the keys it changes and the framework merges them.
+
+**The model is passed in, and built when the graph is built.** Tests give `build_graph` a fake. The worker will call it with no argument, and `get_chat_model()` picks the provider from `LLM_PROVIDER`. The curriculum shows a module-level `app_graph`, but that would read settings and build a model whenever anything imports the module, including the tests, so a function was used instead (D32).
+
+**What the worker has to give it.** The job's fields (`job_id`, `repo_name`, `pr_number`, `head_sha`, `title`, `diff_text`, `diff_truncated`) and nothing else. The two finding lists aren't needed in the input: the reducers start them empty, and the tests check that two runs of one graph don't add up their findings. The worker also has to call `limit_diff` first, which is step 3.8.
+
+**Failures.** If the reply isn't a usable review, `analyze_diff_node` raises `AnalysisError` and the run stops there, before the report node. The error comes out of `ainvoke` unchanged, which is what lets the worker mark the job `failed`.
+
+### Tests
+
+`tests/test_agent_graph.py`, 11 tests, 10 with the fake model: SQL injection and clean diffs give the right state and report; an empty diff skips the model and still gets a report; a diff cut by `limit_diff` gets the truncation note in the prompt and a "Partial review" report; the injection fixture reaches the model once, inside its block; the model is called once; a second run starts with fresh findings; a bad reply raises `AnalysisError`; the compiled graph has exactly the edges above; and the default model comes from the factory. Under the `ollama` marker, the real model runs the whole graph on the SQL fixture and a report with a security section comes out.
+
+Four deliberate breaks: dropping the analyze-to-format edge, ignoring the `model` argument, and replacing the report node each failed tests (the second took about six minutes, because the real model ran the Ollama test). Removing the final `format_report -> END` edge changed nothing, because LangGraph treats a node with no outgoing edge as an end of the run, so that edge is only there to make the shape explicit.
+
 ## Known limitations
 
 - **Ollama is reachable from the local network.** It listens on all interfaces, the firewall is inactive, and Ollama's API has no authentication. Anyone on the same network can run, pull, or delete models. The fix is a firewall rule that allows only Docker's networks to reach port 11434. It isn't applied yet.
@@ -529,3 +549,5 @@ Step 3.5, on 2026-11-03: Ollama's prompt cutting and reading speed were measured
 Step 3.11, on 2026-11-04: the new tests in `tests/test_agent_diff.py` failed first on the missing `number_diff` (`ImportError`). Two failed after the first version: a real bug (the no-newline marker after a finished hunk) and a test with inconsistent hunk counts; the code was fixed for the first and the test data for the second. After that, 18 diff tests passed. The node tests were updated for the numbered block and the changed prompt. Full suite: 230 passed with `-m "not ollama"`. The two real-model tests passed in 99.8 seconds, with the SQL finding's `line` asserted to be 11 or 12, and a direct call returned line 11. A direct call on the other two fixtures failed in the check script only, because it used `asyncio.run` repeatedly with one HTTP client, which is bound to the first event loop; it wasn't repeated. Deliberate breaks were not run for this step.
 
 Step 3.6, on 2026-11-04: `tests/test_agent_report.py` failed first on the missing `src.agent.report`, then its 14 tests passed. Six deliberate breaks each failed one test (listed under "The Markdown report"). Full suite: 244 passed with `-m "not ollama"`; the real-model tests weren't rerun, because nothing they use changed.
+
+Step 3.7, on 2026-11-04: `tests/test_agent_graph.py` failed first on the missing `src.agent.graph`, then its 10 fake-model tests passed. The real-model graph test passed. Full suite including real-model tests: 262 passed in 112 seconds. Four deliberate breaks, three caught (see "The graph").

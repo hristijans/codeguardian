@@ -316,3 +316,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Not shown on a real PR until step 5.7.
 
+## D32: `build_graph(model)` is a function, not a module-level graph (2026-11-04)
+
+**Decision:** `src/agent/graph.py` exposes `build_graph(model=None)`, which compiles the two-node graph and takes the model from `get_chat_model()` only when none is passed. The graph's input is the job's fields only, with no empty finding lists.
+
+**Why:** A module-level `app_graph` would build a model, and read settings, on import, so every test that touched the module would need Ollama's settings. A function keeps imports free of side effects and lets tests pass a fake without patching. The reducers already start the lists empty.
+
+**Rejected:** A module-level `app_graph`, as in the curriculum's sketch. Building the graph lazily with a cached global, which hides state and needs resetting between tests. Passing the model through LangGraph's runtime context, rejected in D28 for the same reasons. Starting the findings with empty lists in the input, which would hide a missing reducer.
+
+**Implemented:** Yes. Nothing outside tests builds the graph until step 3.8.
+
