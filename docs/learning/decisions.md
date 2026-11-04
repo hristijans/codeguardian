@@ -306,3 +306,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Checked with the real model on one fixture only.
 
+## D31: Format the report in plain code, and treat the model's text as untrusted (2026-11-04)
+
+**Decision:** `format_report_node` builds the Markdown with no model call. Every model-written field is cleaned before it goes in: one line, HTML escaped, `@` mentions defused with a zero-width space, link brackets escaped, and no backticks in the file path's code span. Findings are sorted by severity inside two sections, and a truncated review with no findings is never called clean.
+
+**Why:** The layout is fixed, so a model would only add time and variation. The findings come from a model that read attacker-written text, and the output will be public on a real PR, so a diff must not be able to ping users, hide text, or forge headings.
+
+**Rejected:** Asking the model to write the Markdown, which is slow on this CPU and can vary or be steered by the diff. A Jinja2 template, which adds a dependency for about thirty lines. Allowing multi-line explanations, which would keep code blocks but let injected headings through. A Markdown sanitizer library, which would be heavier than rules for the few fields involved. Escaping every Markdown character, which makes ordinary text hard to read.
+
+**Implemented:** Yes. Not shown on a real PR until step 5.7.
+

@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 3.6 `format_report_node`.** Unit 3 is under way. The analysis node puts the title and the line-numbered diff in randomly marked blocks, `limit_diff` keeps diffs to 6,000 characters (sized to this CPU's measured 11 tokens/s and Ollama's 4,096-token window), and `llama3.2` now fills in `line` on the SQL fixture. Nothing calls `limit_diff` yet; the worker will in step 3.8. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
+**Next step: 3.7 Graph assembly `src/agent/graph.py`.** Unit 3 is under way. The analysis node puts the title and the line-numbered diff in randomly marked blocks, `limit_diff` keeps diffs to 6,000 characters (sized to this CPU's measured 11 tokens/s and Ollama's 4,096-token window), and `llama3.2` now fills in `line` on the SQL fixture. Nothing calls `limit_diff` yet; the worker will in step 3.8. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
 
 ## How to use this plan
 
@@ -69,7 +69,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 3.4 | `analyze_diff_node` with mocked-LLM tests | SQL injection and clean diffs give the right structured output | ✅ |
 | 3.5 | Diff limits and prompt-injection handling | Oversized and instruction-bearing diffs behave as designed | ✅ |
 | 3.11 | Number the diff's lines in code before review | Added lines carry their new-file line numbers in the prompt, and findings from the real model have `line` set | ✅ |
-| 3.6 | `format_report_node` | Markdown report is produced | ⬜ |
+| 3.6 | `format_report_node` | Markdown report is produced | ✅ |
 | 3.7 | Graph assembly `src/agent/graph.py` | Graph runs start to end with a mocked LLM | ⬜ |
 | 3.8 | Worker integration | A job's report is stored, with failures marked `failed` | ⬜ |
 | 3.9 | Real review with Ollama | A real PR diff gets a stored review, with quality noted | ⬜ |
@@ -154,3 +154,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-03: Added `make_analyze_diff_node` in `src/agent/nodes.py`, with a fake structured-output model for tests, an `AnalysisError` that the worker treats as a job failure, a skip for empty diffs, and an overall risk raised to the worst finding: 205 passed, nine deliberate breaks caught (step 3.4). Three prompts were compared on two fixture diffs; a checklist of vulnerability types made `llama3.2` report the checklist, and the final short prompt found the injection in 90 tokens. Added `analysis_summary` to the state, and step 3.11 because `line` stayed null in every run. Next: step 3.5.
 - 2026-11-03: Added random-coded `BEGIN`/`END` blocks for the title and diff, a data-only prompt rule, `limit_diff` with `MAX_DIFF_CHARS=6000`, and an explicit `LLM_NUM_CTX=4096`: 224 passed, eleven deliberate breaks caught (step 3.5). Measured that Ollama cuts an overlong prompt with HTTP 200 and only a log warning, and reads about 11 tokens/s on this CPU, so the 0.2 s from step 3.4 was the prompt cache. Asking the model to report injection made it report injection on every diff, so the prompt only says to ignore it; the injection fixture still got its SQL finding. Next: step 3.11.
 - 2026-11-04: Added `number_diff` in `src/agent/diff.py`, applied when the prompt is built, so the model copies line numbers instead of counting: 230 passed, and the real model returned `line` 11 on the SQL fixture, which was `null` in every earlier run (step 3.11). No deliberate breaks were run. Next: step 3.6.
+- 2026-11-04: Added `format_report_node` in `src/agent/report.py`, a plain-code Markdown layout that cleans the model's text for GitHub (mentions, HTML, links, headings): 244 passed, and six deliberate breaks caught (step 3.6). Next: step 3.7.

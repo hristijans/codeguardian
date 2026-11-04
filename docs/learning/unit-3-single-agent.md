@@ -2,7 +2,7 @@
 
 Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`
+**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`
 
 ## Reaching Ollama from the containers
 
@@ -447,6 +447,44 @@ Two of the first test runs failed for reasons worth keeping. The no-newline mark
 
 With the numbered diff, the real test passed and a direct call on the SQL injection fixture gave one finding, `SQL Injection Vulnerability` at line 11 with overall risk `MEDIUM`. Before this step `line` was `null` in every run. That is one fixture and a few runs, so it shows the numbers are being used, not how often.
 
+## The Markdown report: `src/agent/report.py`
+
+`format_report_node(state)` turns the findings into the Markdown comment that step 5.1 will post, and returns only `final_summary`. It doesn't call the model: the findings are already structured, so laying them out is plain code that is free, instant, and identical every time. Its tests need no fake model.
+
+### The layout
+
+```
+## CodeGuardian review
+
+**Overall risk:** HIGH
+
+> **Partial review:** ...            (only if the diff was truncated)
+
+<the model's summary>
+
+### Security vulnerabilities (1)
+
+1. **HIGH**: SQL injection (`app/users.py:11`)
+   The username is put into the query text.
+   *Suggestion:* Use a parameterized query.
+
+### Other issues (n)               (a section is left out when empty)
+
+_This is an automated review by a language model. ..._
+```
+
+- Findings are listed most severe first inside each section. `sorted(..., reverse=True)` is stable, so equal severities keep the model's order.
+- With no findings the report says "No problems found in the added lines." But a truncated review with no findings doesn't say that, because it can't vouch for the part it never read.
+- A missing `line` shows the file alone, and a missing suggestion is left out.
+
+### Cleaning the model's text
+
+A finding's text came from a model reading an untrusted diff, and the Markdown will be posted on GitHub. Without cleaning, a diff could make the model write `@someone` (pinging a real user), `<!-- hidden -->` or `<img>` (hiding text or loading an image), a `[link](url)`, or a newline followed by `## Approved` (a fake heading). `_inline` collapses the text to one line, escapes HTML with `html.escape(quote=False)`, puts a zero-width space after every `@` that starts a name so it no longer mentions anyone, and escapes `[` and `]`. `_code` builds the file path's code span with backticks removed so the path can't close it. Laravel's `e()` and Blade's `{{ }}` do the HTML part of this for you; Markdown has no such built-in, so it's done by hand.
+
+### Tests
+
+`tests/test_agent_report.py`, 14 tests: the node returns only `final_summary`, the details appear, security comes before other issues, severity ordering, missing line and suggestion, the no-findings text and no empty sections, the partial note shown and not shown, a truncated empty review not called clean, the automated footer, and the four cleaning cases above. Six deliberate breaks each failed a test: no HTML escaping, no mention defusing, no severity sort, backticks left in the path, no whitespace collapsing, and the clean message shown for a truncated review.
+
 ## Known limitations
 
 - **Ollama is reachable from the local network.** It listens on all interfaces, the firewall is inactive, and Ollama's API has no authentication. Anyone on the same network can run, pull, or delete models. The fix is a firewall rule that allows only Docker's networks to reach port 11434. It isn't applied yet.
@@ -469,6 +507,13 @@ With the numbered diff, the real test passed and a direct call on the SQL inject
 - **Text fields have no length limits.** A model could return a very long `explanation`. Whether limits are needed is left until real reviews in step 3.9.
 - **Configuration errors appear late.** A wrong `LLM_PROVIDER` raises on the first `get_chat_model()` call, not when the app starts, and a wrong model name only on the first LLM call.
 
+## Known limitations of the report
+
+- **Zero-width spaces are invisible.** A defused mention looks the same as a real one on screen, and copying it carries the hidden character along.
+- **The cleaning is for GitHub's Markdown.** Another place to show the report would need its own rules. Bare URLs in the text still turn into links on GitHub, and only brackets are escaped.
+- **Every field is one line.** A suggestion containing a code block loses its layout. That is the price of stopping injected headings and lists.
+- **The report wasn't shown on a real PR.** It was only checked as text, so how GitHub renders it is unverified until step 5.7.
+
 ## Verification record
 
 Step 3.1, on 2026-11-02: the four tests in `tests/test_ollama.py` failed first with `Temporary failure in name resolution`. After adding `extra_hosts` and recreating `api` and `worker`, both containers resolved `host.docker.internal` to `172.17.0.1`, and the four tests passed in 5.3 seconds. A deliberate break, `LLM_MODEL=not-a-pulled-model`, failed the two model tests and left the two connection tests passing. From the worker container, `llama3.2` answered a 49-token review prompt with 300 tokens at 6.0 tokens/s, 54.1 seconds in total, and named the SQL injection. Full suite: 155 passed, and 151 passed with `-m "not ollama"`.
@@ -482,3 +527,5 @@ Step 3.4, on 2026-11-03: `tests/test_agent_nodes.py` failed first on the missing
 Step 3.5, on 2026-11-03: Ollama's prompt cutting and reading speed were measured first (see "Diff size limit"). The new tests in `tests/test_agent_diff.py`, `tests/test_agent_nodes.py`, and `tests/test_llm.py` failed first on the missing module and settings, then passed. Two versions of the untrusted-input rule were compared on the three fixture diffs (see "What happened with the real model"). A deliberate break that fixed the marker code made the collision loop hang the tests, so the loop was bounded, test-first: the new test hung until a 60-second `timeout` killed it, then passed. Eleven deliberate breaks each failed at least one test: cutting mid-line, `<` for `<=`, allowing a zero limit, a fixed code, no collision check, the truncation note always added, the note inside the diff block, no `num_ctx`, the title outside a block, no untrusted-input rules, and the unbounded loop. Full suite: 224 passed in 126 seconds, the two real-model tests taking about a minute each, and 217 passed with `-m "not ollama"`.
 
 Step 3.11, on 2026-11-04: the new tests in `tests/test_agent_diff.py` failed first on the missing `number_diff` (`ImportError`). Two failed after the first version: a real bug (the no-newline marker after a finished hunk) and a test with inconsistent hunk counts; the code was fixed for the first and the test data for the second. After that, 18 diff tests passed. The node tests were updated for the numbered block and the changed prompt. Full suite: 230 passed with `-m "not ollama"`. The two real-model tests passed in 99.8 seconds, with the SQL finding's `line` asserted to be 11 or 12, and a direct call returned line 11. A direct call on the other two fixtures failed in the check script only, because it used `asyncio.run` repeatedly with one HTTP client, which is bound to the first event loop; it wasn't repeated. Deliberate breaks were not run for this step.
+
+Step 3.6, on 2026-11-04: `tests/test_agent_report.py` failed first on the missing `src.agent.report`, then its 14 tests passed. Six deliberate breaks each failed one test (listed under "The Markdown report"). Full suite: 244 passed with `-m "not ollama"`; the real-model tests weren't rerun, because nothing they use changed.
