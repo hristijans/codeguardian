@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "llama3.2"
     # How long one LLM call may take. A CPU-only review takes about a minute.
     LLM_TIMEOUT_SECONDS: float = 300.0
+    # Tokens the model can see at once: prompt and reply together. Ollama cuts
+    # a longer prompt from the start without an error, so the diff limit
+    # below has to leave room for the system prompt and the reply.
+    LLM_NUM_CTX: int = 4096
+    # The longest diff sent for review, in characters. About 1,700 tokens,
+    # which this CPU reads in about two and a half minutes.
+    MAX_DIFF_CHARS: int = 6000
 
     model_config = SettingsConfigDict(
         env_file=".env",

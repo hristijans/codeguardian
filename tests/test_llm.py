@@ -41,6 +41,14 @@ def test_timeout_reaches_the_http_client(settings: Settings):
     assert model.client_kwargs["timeout"] == 42.0
 
 
+def test_context_window_is_set_explicitly(settings: Settings):
+    # Ollama cuts a prompt longer than its window without an error, so the
+    # window is a setting rather than whatever Ollama defaults to.
+    model = get_chat_model(with_settings(settings, LLM_NUM_CTX=2048))
+
+    assert model.num_ctx == 2048
+
+
 def test_returned_model_is_the_generic_type(settings: Settings):
     # Nodes only rely on the LangChain interface, not on ChatOllama.
     assert isinstance(get_chat_model(settings), BaseChatModel)

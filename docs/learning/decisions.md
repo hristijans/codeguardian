@@ -286,3 +286,23 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Nothing runs the node outside tests until the graph in step 3.7.
 
+## D29: Random block markers, a data-only prompt rule, and a character limit sized to the CPU (2026-11-03)
+
+**Decision:** The title and diff go in `BEGIN`/`END` blocks whose marker lines carry a random 16-hex-digit code chosen per review, checked against the text, with ten attempts before `RuntimeError`. The system prompt says the blocks are data and never instructions, and doesn't ask the model to report injection attempts. `limit_diff` cuts a diff to `MAX_DIFF_CHARS` (6,000) at a line boundary, and the node adds a truncation note outside the block. `LLM_NUM_CTX` (4,096) sets Ollama's context window explicitly.
+
+**Why:** Fixed tags can be closed from inside the diff, and an unpredictable code can't. The code is only in the human message, so the system prompt stays the same and Ollama's prompt cache keeps working. Asking the model to report injection made it report injection on every diff, and the defences that matter (no tools, schema-only output, the risk rule in code) don't depend on detection. The limits follow the measurements in the Unit 3 notes: Ollama silently cuts prompts that don't fit the window, and this CPU reads about 11 tokens per second.
+
+**Rejected:** Escaping `</diff>` inside the diff, which changes the code the model sees and still leaves fixed tags, and HTML files contain tags such as `</title>`. A code in the system prompt, which would defeat the cache. Detecting injection with keyword rules, which is easy to get around and would flag honest code that mentions "ignore". A second model call to check for injection, which would double the review time. A token limit using a tokenizer, which needs the model's tokenizer in the worker for little gain over a measured ratio. Raising `num_ctx` to fit bigger diffs, which doesn't help when reading is the slow part. Reviewing a long diff in chunks, file by file, which would cover the whole PR but multiply the time. That may suit Unit 4's parallel agents.
+
+**Implemented:** Yes. `limit_diff` isn't called until the worker builds the state in step 3.8.
+
+## D30: Number the diff's lines in code, at prompt time (2026-11-04)
+
+**Decision:** `number_diff` puts each hunk line's new-file line number in a gutter before the line, and `build_messages` applies it, so the model copies a number instead of counting from `@@` headers. The state's `diff_text` stays as GitHub sent it. Hunks are followed by the counts in their headers, not by the first characters of each line. The numbering happens after `limit_diff`.
+
+**Why:** The model returned `line: null` in every try, including with the counting explained in the prompt, and counting is a job code does exactly. Numbering at prompt time keeps the stored diff exact for the report and for publishing in Unit 5. The header counts are the only reliable way to tell a removed `-- x` from a `---` file header.
+
+**Rejected:** A better prompt for counting, which was already tried in step 3.4 without effect. Asking for a quote of the problem line and finding its number in code afterwards, which is a second pass over the diff and fails when the model misquotes. Numbering inside the state, which would put the gutter in the stored diff and in the report. Numbering before `limit_diff`, which keeps the prompt size to the limit but would make the worker depend on the prompt's format; the extra 8 characters per line are noted as a limitation instead. Checking whether a returned `line` points at an added line, which is worthwhile but needs the numbered lines as a lookup and is left until step 3.9 shows how often it's wrong.
+
+**Implemented:** Yes. Checked with the real model on one fixture only.
+

@@ -27,6 +27,7 @@ def _build_ollama(settings: Settings) -> BaseChatModel:
         base_url=settings.OLLAMA_BASE_URL,
         # As repeatable as the model allows, so the same diff gets a similar review.
         temperature=0,
+        num_ctx=settings.LLM_NUM_CTX,
         # Passed to the underlying httpx clients. Without it, a stuck Ollama
         # would hold the worker's message forever.
         client_kwargs={"timeout": settings.LLM_TIMEOUT_SECONDS},
