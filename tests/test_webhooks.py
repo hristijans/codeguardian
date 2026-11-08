@@ -20,6 +20,7 @@ from src.main import app, get_job_publisher, get_job_store
 from src.queue import JobPublisher, PublishError
 from src.schemas import JobStatus, ReviewJobMessage
 from src.worker import Worker, start_consuming
+from tests.fakes import FakeGraph
 
 URL = "/api/v1/webhooks/github/pr"
 SECRET = "example-webhook-secret"
@@ -498,7 +499,7 @@ async def test_signed_webhook_is_reviewed_by_the_worker(
     try:
         async with github:
             channel = await connection.channel()
-            await start_consuming(channel, Worker(store, github), test_queue.name)
+            await start_consuming(channel, Worker(store, github, FakeGraph(), 6000), test_queue.name)
             for _ in range(50):
                 job = (await async_client.get(f"/api/v1/jobs/{job_id}")).json()
                 if job["status"] in ("completed", "failed"):

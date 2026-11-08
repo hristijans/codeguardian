@@ -7,12 +7,16 @@ import asyncio
 import logging
 import signal
 from datetime import datetime, timezone
+from typing import Any
 
 import aio_pika
 import redis.asyncio as aioredis
 from aio_pika.abc import AbstractChannel, AbstractIncomingMessage
 from pydantic import ValidationError
 
+from src.agent.diff import limit_diff
+from src.agent.graph import build_graph
+from src.agent.nodes import AnalysisError
 from src.cache import JobStore
 from src.config import get_settings
 from src.github import GitHubClient, GitHubError
@@ -29,13 +33,22 @@ class Worker:
     """Runs one review job per message.
 
     `process_job` moves the job's record through its statuses. `handle_message`
-    wraps it and decides what to tell the broker. The store and the GitHub
-    client are passed in, so tests can use their own.
+    wraps it and decides what to tell the broker. The store, the GitHub client
+    and the review graph are passed in, so tests can use their own. The graph
+    is anything with `ainvoke(state)`, which is what `build_graph()` returns.
     """
 
-    def __init__(self, store: JobStore, github: GitHubClient) -> None:
+    def __init__(
+        self,
+        store: JobStore,
+        github: GitHubClient,
+        graph: Any,
+        max_diff_chars: int,
+    ) -> None:
         self._store = store
         self._github = github
+        self._graph = graph
+        self._max_diff_chars = max_diff_chars
 
     async def process_job(self, message: ReviewJobMessage) -> None:
         """Run a job, ending with its record `completed` or `failed`.
@@ -65,11 +78,36 @@ class Worker:
             log.info("Job %s failed: %s", job.job_id, error)
             return
 
-        # Simulated review: Unit 3 replaces this with the LangGraph agent.
-        # Only the size is logged, because a diff can contain secrets.
-        log.info("Job %s: fetched a diff of %d lines", job.job_id, diff.count("\n"))
+        limited = limit_diff(diff, self._max_diff_chars)
+        # Only sizes are logged, because a diff can contain secrets.
+        log.info(
+            "Job %s: reviewing a diff of %d characters%s",
+            job.job_id,
+            limited.original_chars,
+            " (truncated)" if limited.truncated else "",
+        )
+        try:
+            result = await self._graph.ainvoke(
+                {
+                    "job_id": job.job_id,
+                    "repo_name": job.repo_name,
+                    "pr_number": job.pr_number,
+                    "head_sha": job.head_sha,
+                    "title": job.title,
+                    "diff_text": limited.text,
+                    "diff_truncated": limited.truncated,
+                }
+            )
+        except AnalysisError as error:
+            # The model answered, but not with a usable review. Asking again
+            # would most likely give the same answer. The message never quotes
+            # the reply, so it is safe to store. Any other error, such as the
+            # model being unreachable, is raised and gets the retry.
+            await self._set_status(job, JobStatus.FAILED, error=str(error))
+            log.info("Job %s failed: %s", job.job_id, error)
+            return
 
-        await self._set_status(job, JobStatus.COMPLETED)
+        await self._set_status(job, JobStatus.COMPLETED, report=result["final_summary"])
         log.info("Job %s completed", job.job_id)
 
     async def handle_message(self, incoming: AbstractIncomingMessage) -> None:
@@ -126,11 +164,13 @@ class Worker:
         job: JobStatusDetails,
         status: JobStatus,
         error: str | None = None,
+        report: str | None = None,
     ) -> JobStatusDetails:
         updated = job.model_copy(
             update={
                 "status": status,
                 "error": error,
+                "report": report,
                 "updated_at": datetime.now(timezone.utc),
             }
         )
@@ -173,7 +213,9 @@ async def main() -> None:
     try:
         async with GitHubClient(settings.GITHUB_TOKEN) as github:
             channel = await connection.channel()
-            await start_consuming(channel, Worker(JobStore(redis), github))
+            graph = build_graph()
+            worker = Worker(JobStore(redis), github, graph, settings.MAX_DIFF_CHARS)
+            await start_consuming(channel, worker)
             log.info("Waiting for jobs on %s", QUEUE_NAME)
             await stop.wait()
             log.info("Stopping")

@@ -326,3 +326,13 @@ Dates use the format YYYY-MM-DD. "Implemented" shows whether the decision exists
 
 **Implemented:** Yes. Nothing outside tests builds the graph until step 3.8.
 
+## D33: The worker takes the graph as an argument, and only `AnalysisError` fails a job outright (2026-11-04)
+
+**Decision:** `Worker(store, github, graph, max_diff_chars)` requires the compiled graph and the size limit. `process_job` cuts the diff, runs the graph, and stores `final_summary` as a new optional `report` field on the job record. `AnalysisError` marks the job `failed` with its message. Any other graph error is raised, so the existing one-retry rule applies.
+
+**Why:** Passing the graph in matches how the store and GitHub client are passed, so tests need no patching. Required arguments mean a worker can't start without a review. An unusable reply is deterministic and not worth retrying, while a model that's down may well be back a minute later. A default of `None` on the field keeps old Redis records readable.
+
+**Rejected:** A module-level graph imported by the worker, rejected in D32. Optional graph with a skip, which would hide a broken setup. Marking every graph error `failed` straight away, which gives up on a model that's only briefly down. Storing the report in a separate Redis key, which adds a second lookup for no gain at this size. Storing the report only in the final state and not on the job, which leaves nothing for the API to return.
+
+**Implemented:** Yes. Checked with a fake GitHub only; the first live review is step 3.9.
+

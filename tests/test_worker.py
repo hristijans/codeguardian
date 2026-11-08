@@ -12,6 +12,7 @@ from src.github import GitHubClient
 from src.queue import JobPublisher
 from src.schemas import JobStatus, JobStatusDetails, ReviewJobMessage
 from src.worker import Worker, start_consuming
+from tests.fakes import FakeGraph
 
 DIFF = "diff --git a/app.py b/app.py\n+print('hello')\n"
 
@@ -53,7 +54,7 @@ async def worker(store: JobStore, fake_github: FakeGitHub):
         SecretStr("example-token"), transport=httpx.MockTransport(fake_github)
     )
     async with github:
-        yield Worker(store, github)
+        yield Worker(store, github, FakeGraph(), 6000)
 
 
 def message_for(job: JobStatusDetails, **changes) -> ReviewJobMessage:
@@ -83,7 +84,7 @@ async def test_queued_job_is_completed(worker: Worker, store: JobStore, make_job
     assert done.updated_at > job.updated_at
     # Everything else about the job stays as it was.
     assert done.model_copy(
-        update={"status": job.status, "updated_at": job.updated_at}
+        update={"status": job.status, "updated_at": job.updated_at, "report": None}
     ) == job
 
 
@@ -104,7 +105,7 @@ async def test_job_is_processing_while_the_diff_is_fetched(
         transport=httpx.MockTransport(FakeGitHub(look_at_redis)),
     )
     async with github:
-        await Worker(store, github).process_job(message_for(job))
+        await Worker(store, github, FakeGraph(), 6000).process_job(message_for(job))
 
     assert seen == [JobStatus.PROCESSING]
 
@@ -131,7 +132,7 @@ async def test_github_error_fails_the_job(store: JobStore, make_job):
 
     async with github:
         # Doesn't raise: a failed job is a finished job.
-        await Worker(store, github).process_job(message_for(job))
+        await Worker(store, github, FakeGraph(), 6000).process_job(message_for(job))
 
     failed = await store.get(job.job_id)
     assert failed.status == JobStatus.FAILED
@@ -151,7 +152,7 @@ async def test_unreachable_github_fails_the_job(store: JobStore, make_job):
         SecretStr("example-token"), transport=httpx.MockTransport(FakeGitHub(refuse))
     )
     async with github:
-        await Worker(store, github).process_job(message_for(job))
+        await Worker(store, github, FakeGraph(), 6000).process_job(message_for(job))
 
     failed = await store.get(job.job_id)
     assert failed.status == JobStatus.FAILED
@@ -228,7 +229,7 @@ async def test_unexpected_error_is_raised(fake_github: FakeGitHub, make_job):
     )
     async with github:
         with pytest.raises(ConnectionError):
-            await Worker(BrokenStore(), github).process_job(message_for(make_job()))
+            await Worker(BrokenStore(), github, FakeGraph(), 6000).process_job(message_for(make_job()))
 
 
 # handle_message: what the broker is told
@@ -293,7 +294,7 @@ async def test_failed_job_is_still_acked(store: JobStore, make_job):
     incoming = FakeIncoming(body_for(job))
 
     async with github:
-        await Worker(store, github).handle_message(incoming)
+        await Worker(store, github, FakeGraph(), 6000).handle_message(incoming)
 
     assert incoming.calls == [("ack",)]
     assert (await store.get(job.job_id)).status == JobStatus.FAILED
@@ -325,8 +326,8 @@ async def test_unexpected_error_requeues_the_message_once(
 
     async with github:
         # Neither call raises: the consumer must keep running.
-        await Worker(BrokenStore(), github).handle_message(first)
-        await Worker(BrokenStore(), github).handle_message(again)
+        await Worker(BrokenStore(), github, FakeGraph(), 6000).handle_message(first)
+        await Worker(BrokenStore(), github, FakeGraph(), 6000).handle_message(again)
 
     assert first.calls == [("reject", True)]
     assert again.calls == [("reject", False)]
@@ -348,7 +349,7 @@ async def test_dropped_job_is_marked_failed(store: JobStore, make_job):
     again = FakeIncoming(body_for(job), redelivered=True)
 
     async with github:
-        worker = Worker(store, github)
+        worker = Worker(store, github, FakeGraph(), 6000)
         await worker.handle_message(first)
         # Still processing: the retry may succeed.
         assert (await store.get(job.job_id)).status == JobStatus.PROCESSING
@@ -396,3 +397,135 @@ async def test_published_job_is_consumed_and_acked(
     assert (await store.get(job.job_id)).status == JobStatus.COMPLETED
     # Only an ack keeps the message from coming back to the queue.
     assert await test_queue.get(fail=False) is None
+
+
+# process_job: the review
+
+
+async def run(store: JobStore, fake_github: FakeGitHub, job: JobStatusDetails, graph: FakeGraph, max_chars: int = 6000):
+    github = GitHubClient(SecretStr("example-token"), transport=httpx.MockTransport(fake_github))
+    async with github:
+        await Worker(store, github, graph, max_chars).process_job(message_for(job))
+
+
+@pytest.mark.asyncio
+async def test_report_is_stored_on_the_completed_job(store: JobStore, fake_github: FakeGitHub, make_job):
+    job = make_job()
+    await store.save(job)
+
+    await run(store, fake_github, job, FakeGraph(report="## The report\n"))
+
+    done = await store.get(job.job_id)
+    assert done.status == JobStatus.COMPLETED
+    assert done.report == "## The report\n"
+
+
+@pytest.mark.asyncio
+async def test_graph_gets_the_job_and_the_diff(store: JobStore, fake_github: FakeGitHub, make_job):
+    job = make_job()
+    await store.save(job)
+    graph = FakeGraph()
+
+    await run(store, fake_github, job, graph)
+
+    (state,) = graph.calls
+    assert state == {
+        "job_id": job.job_id,
+        "repo_name": job.repo_name,
+        "pr_number": job.pr_number,
+        "head_sha": job.head_sha,
+        "title": job.title,
+        "diff_text": DIFF,
+        "diff_truncated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_oversized_diff_is_cut_before_the_graph(store: JobStore, fake_github: FakeGitHub, make_job):
+    job = make_job()
+    await store.save(job)
+    graph = FakeGraph()
+
+    await run(store, fake_github, job, graph, max_chars=len("diff --git a/app.py b/app.py\n"))
+
+    (state,) = graph.calls
+    assert state["diff_truncated"] is True
+    assert state["diff_text"] == "diff --git a/app.py b/app.py\n"
+
+
+@pytest.mark.asyncio
+async def test_job_is_processing_while_the_graph_runs(store: JobStore, fake_github: FakeGitHub, make_job):
+    job = make_job()
+    await store.save(job)
+    seen = []
+
+    async def look(state):
+        seen.append((await store.get(job.job_id)).status)
+
+    await run(store, fake_github, job, FakeGraph(on_call=look))
+
+    assert seen == [JobStatus.PROCESSING]
+
+
+@pytest.mark.asyncio
+async def test_unusable_model_reply_fails_the_job(store: JobStore, fake_github: FakeGitHub, make_job):
+    from src.agent.nodes import AnalysisError
+
+    job = make_job()
+    await store.save(job)
+
+    await run(store, fake_github, job, FakeGraph(error=AnalysisError("The model's reply wasn't a valid review (X).")))
+
+    failed = await store.get(job.job_id)
+    assert failed.status == JobStatus.FAILED
+    assert failed.error == "The model's reply wasn't a valid review (X)."
+    assert failed.report is None
+
+
+@pytest.mark.asyncio
+async def test_other_graph_errors_are_raised_for_a_retry(store: JobStore, fake_github: FakeGitHub, make_job):
+    job = make_job()
+    await store.save(job)
+
+    with pytest.raises(ConnectionError):
+        await run(store, fake_github, job, FakeGraph(error=ConnectionError("model down")))
+
+    # Still `processing`, not failed: handle_message decides about the retry.
+    assert (await store.get(job.job_id)).status == JobStatus.PROCESSING
+
+
+@pytest.mark.asyncio
+async def test_graph_is_not_run_when_the_diff_fails(store: JobStore, make_job):
+    job = make_job()
+    await store.save(job)
+    graph = FakeGraph()
+    github = GitHubClient(SecretStr("example-token"), transport=httpx.MockTransport(lambda r: httpx.Response(404)))
+
+    async with github:
+        await Worker(store, github, graph, 6000).process_job(message_for(job))
+
+    assert graph.calls == []
+    assert (await store.get(job.job_id)).status == JobStatus.FAILED
+
+
+@pytest.mark.ollama
+@pytest.mark.asyncio
+async def test_real_review_is_stored_on_the_job(store: JobStore, make_job):
+    from src.agent.graph import build_graph
+    from tests.test_agent_nodes import DIFFS
+
+    sql_diff = (DIFFS / "sql_injection.diff").read_text()
+    job = make_job()
+    await store.save(job)
+    github = GitHubClient(
+        SecretStr("example-token"),
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=sql_diff)),
+    )
+
+    async with github:
+        await Worker(store, github, build_graph(), 6000).process_job(message_for(job))
+
+    done = await store.get(job.job_id)
+    assert done.status == JobStatus.COMPLETED, done.error
+    assert done.report.startswith("## CodeGuardian review")
+    assert "Security vulnerabilities" in done.report

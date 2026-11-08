@@ -2,7 +2,7 @@
 
 Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`, `src/agent/graph.py`, `tests/test_agent_graph.py`
+**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`, `src/agent/graph.py`, `tests/test_agent_graph.py`, `src/worker.py` (changed), `tests/fakes.py`
 
 ## Reaching Ollama from the containers
 
@@ -505,6 +505,32 @@ A finding's text came from a model reading an untrusted diff, and the Markdown w
 
 Four deliberate breaks: dropping the analyze-to-format edge, ignoring the `model` argument, and replacing the report node each failed tests (the second took about six minutes, because the real model ran the Ollama test). Removing the final `format_report -> END` edge changed nothing, because LangGraph treats a node with no outgoing edge as an end of the run, so that edge is only there to make the shape explicit.
 
+## Worker integration: `src/worker.py`
+
+Until now the worker fetched the diff and marked the job `completed` without reviewing anything. Step 3.8 puts the graph in that gap. After `fetch_diff`, `process_job` now:
+
+1. Cuts the diff with `limit_diff(diff, max_diff_chars)`. This is where `limit_diff` is finally called.
+2. Calls `await graph.ainvoke({...})` with exactly the job's fields, the cut diff text, and `diff_truncated`.
+3. Saves the job as `completed` with `report=result["final_summary"]`.
+
+`Worker(store, github, graph, max_diff_chars)` takes both new things as arguments, like the store and the client, so tests pass a `FakeGraph` (in `tests/fakes.py`) and `main()` passes `build_graph()` and `settings.MAX_DIFF_CHARS`. They're required: a default of "no graph" would let a misconfigured worker quietly skip the review. The graph is built once when the worker starts, not for every job. If `LLM_PROVIDER` is wrong, the worker fails at startup, not on the first job.
+
+`JobStatusDetails` gained `report: Optional[str] = None`. The default means records saved before this step still load (the limitation noted in the Unit 2 notes). `GET /api/v1/jobs/{job_id}` returns it through the existing `response_model`, so a client sees the report there.
+
+### Which failures fail the job
+
+- **`AnalysisError`** (the model answered, but not with a valid review): the job is saved as `failed`, with the error's message, which never quotes the reply. Not retried, because at `temperature=0` the same prompt would most likely give the same reply.
+- **Any other error from the graph**, such as Ollama being down or timing out: raised out of `process_job`, so `handle_message` requeues the message once, then marks the job `failed` and drops it, as it already did for other unexpected errors.
+- **A GitHub error**: unchanged, the job fails before the graph runs.
+
+A slow retry is the cost of the second rule: a timed-out review is retried once, so it can use twice `LLM_TIMEOUT_SECONDS`.
+
+### Tests
+
+Eight new tests in `tests/test_worker.py`, seven with `FakeGraph`: the report is stored on the completed job; the graph gets the job's fields and the diff, and nothing else; an oversized diff is cut and flagged before the graph sees it; the job is `processing` while the graph runs; `AnalysisError` fails the job with its message and no report; another error is raised and leaves the job `processing`; the graph isn't run when the diff can't be fetched. Under the `ollama` marker, the real graph reviews the SQL injection fixture through the worker, and the stored report has a security section. The existing worker and end-to-end tests changed only to pass a `FakeGraph`, plus one assertion that `report` is `None` unless set.
+
+Six deliberate breaks each failed a test: sending the uncut diff, a fixed `diff_truncated`, storing no report, catching the wrong exception, not saving the report, and sending an empty title.
+
 ## Known limitations
 
 - **Ollama is reachable from the local network.** It listens on all interfaces, the firewall is inactive, and Ollama's API has no authentication. Anyone on the same network can run, pull, or delete models. The fix is a firewall rule that allows only Docker's networks to reach port 11434. It isn't applied yet.
@@ -520,7 +546,7 @@ Four deliberate breaks: dropping the analyze-to-format edge, ignoring the `model
 - **False positives on clean code.** The final prompt still gave the clean fixture diff two low-grade findings. Review quality is judged in step 3.9, and a bigger model may be the real fix.
 - **The prompt was tuned on two small diffs, one run each.** That's enough to spot the checklist problem, not to show the prompt is good. A repeatable comparison needs the evaluation suite in Unit 6.
 - **The prompt-injection defence is a prompt.** The model is told to treat the blocks as data, and it held against one fixture in one run. Nothing guarantees that for other wording or a bigger attack. The real protections are structural: no tools, schema-only output, and the risk rule in code.
-- **Nothing calls `limit_diff` yet.** The worker will, when it builds the state in step 3.8. Until then, a long diff reaching the node would be sent whole.
+- **`limit_diff` is called by the worker only.** Anything else that runs the graph, such as a script, has to cut the diff itself, or a long diff is sent whole.
 - **The size limit is in characters, not tokens.** 6,000 characters was about 1,700 tokens for the measured code, but a diff of long identifiers or non-English text can use more tokens per character.
 - **Truncation keeps the start of the diff.** Files later in the diff aren't reviewed at all, and the cut can end a file halfway through its hunks.
 - **The limits were measured on a loaded desktop.** Ollama shared the CPU with other apps. The speeds would differ on another machine, so `MAX_DIFF_CHARS`, `LLM_NUM_CTX`, and `LLM_TIMEOUT_SECONDS` are settings.
@@ -533,6 +559,14 @@ Four deliberate breaks: dropping the analyze-to-format edge, ignoring the `model
 - **The cleaning is for GitHub's Markdown.** Another place to show the report would need its own rules. Bare URLs in the text still turn into links on GitHub, and only brackets are escaped.
 - **Every field is one line.** A suggestion containing a code block loses its layout. That is the price of stopping injected headings and lists.
 - **The report wasn't shown on a real PR.** It was only checked as text, so how GitHub renders it is unverified until step 5.7.
+
+## Known limitations of the worker integration
+
+- **The report is public to anyone with the job ID.** `GET /api/v1/jobs/{job_id}` has no authentication, as before, and now returns the review, which can quote code from the diff. The ID is a random UUID, but it isn't a secret. Worth deciding before the stack holds real repositories (see step 0.11).
+- **The report expires with the job.** Records last 24 hours in Redis, so a report isn't kept longer. Unit 4's Postgres tables may change that.
+- **One review at a time.** The worker handles one message at once (`prefetch_count=1`) and a review takes minutes on this CPU, so jobs queue up behind each other.
+- **The retry can be long.** A review that times out is retried once.
+- **Checked with a mocked GitHub only.** The real-model test used a fixture diff through a fake GitHub transport. A live PR is step 3.9.
 
 ## Verification record
 
@@ -551,3 +585,5 @@ Step 3.11, on 2026-11-04: the new tests in `tests/test_agent_diff.py` failed fir
 Step 3.6, on 2026-11-04: `tests/test_agent_report.py` failed first on the missing `src.agent.report`, then its 14 tests passed. Six deliberate breaks each failed one test (listed under "The Markdown report"). Full suite: 244 passed with `-m "not ollama"`; the real-model tests weren't rerun, because nothing they use changed.
 
 Step 3.7, on 2026-11-04: `tests/test_agent_graph.py` failed first on the missing `src.agent.graph`, then its 10 fake-model tests passed. The real-model graph test passed. Full suite including real-model tests: 262 passed in 112 seconds. Four deliberate breaks, three caught (see "The graph").
+
+Step 3.8, on 2026-11-04: the new worker tests failed first with `TypeError` on the old `Worker` constructor, then passed. One old test failed after the change, because the record now has a `report`, and was updated. Six deliberate breaks, all caught. The worker container restarted and logged "Waiting for jobs" with the real graph built. Full suite including real-model tests: 270 passed in 205 seconds.

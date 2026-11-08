@@ -53,6 +53,8 @@ class JobStatusDetails(BaseModel):
     created_at: datetime
     updated_at: datetime
     error: Optional[str] = None
+    # The Markdown review, set when the job completes.
+    report: Optional[str] = None
 
 
 class ReviewJobMessage(BaseModel):
