@@ -566,7 +566,25 @@ Six deliberate breaks each failed a test: sending the uncut diff, a fixed `diff_
 - **The report expires with the job.** Records last 24 hours in Redis, so a report isn't kept longer. Unit 4's Postgres tables may change that.
 - **One review at a time.** The worker handles one message at once (`prefetch_count=1`) and a review takes minutes on this CPU, so jobs queue up behind each other.
 - **The retry can be long.** A review that times out is retried once.
-- **Checked with a mocked GitHub only.** The real-model test used a fixture diff through a fake GitHub transport. A live PR is step 3.9.
+- **Live check was one small PR.** Step 3.9 ran a single 522-character diff with one planted flaw. See "First real review" for what it showed and didn't.
+
+## First real review (step 3.9)
+
+A PR was opened on a repository in the allowlist with one new file, a Laravel helper that builds a `LIKE` query by concatenating user input into the SQL string. The signed webhook came through the relay, the worker fetched the real diff (522 characters, well under the 6,000-character limit), `llama3.2` reviewed it, and the job ended `completed` with the report stored in the `report` field.
+
+What the review got right: it found the SQL injection, named the file and the variable, and explained the attack in one sentence. There were no invented findings.
+
+What was weak:
+
+- **Severity was too low.** The finding came back `MEDIUM`, and so did the overall risk. Concatenating input into SQL is `HIGH` at least, and that is the level the approval gate in Unit 5 would act on.
+- **No line number.** The finding has a file but no line, so the report shows none. Step 3.11 got `line` right on the fixture diff, but the PHP file did not reproduce it. A new file's added lines are numbered from 1, so this may depend on the model rather than on `number_diff`. That is unverified, since one run is not enough to say.
+- **A stray heading line.** The report has a line, "Security Vulnerabilities and Bugs", above the findings. It is the model's `analysis_summary`, which was meant to be a sentence about the diff, and here it is a title. The prompt does not say what the summary should contain.
+
+One run of one diff is a sample, not a measurement. The proper measurement is the golden dataset in Unit 6.
+
+### A stale allowlist caused the first miss
+
+The first delivery returned 200 and created no job. The API container still held the previous `REVIEW_REPOSITORIES` value, because Compose reads `.env` when a container is created, not on each start. `docker compose restart` would not have fixed it. `docker compose up -d --force-recreate api worker` did, and a redelivery from GitHub was then accepted with 202. A 200 for a real PR event means "filtered", so the first thing to check is the allowlist the container actually loaded.
 
 ## Verification record
 
@@ -587,3 +605,5 @@ Step 3.6, on 2026-11-04: `tests/test_agent_report.py` failed first on the missin
 Step 3.7, on 2026-11-04: `tests/test_agent_graph.py` failed first on the missing `src.agent.graph`, then its 10 fake-model tests passed. The real-model graph test passed. Full suite including real-model tests: 262 passed in 112 seconds. Four deliberate breaks, three caught (see "The graph").
 
 Step 3.8, on 2026-11-04: the new worker tests failed first with `TypeError` on the old `Worker` constructor, then passed. One old test failed after the change, because the record now has a `report`, and was updated. Six deliberate breaks, all caught. The worker container restarted and logged "Waiting for jobs" with the real graph built. Full suite including real-model tests: 270 passed in 205 seconds.
+
+Step 3.9, on 2026-11-08: a live PR on an allowlisted repository, through the smee relay. The first delivery returned 200 (filtered) because the api container held a stale allowlist; after `--force-recreate` of `api` and `worker`, a redelivery returned 202 and the job went to `completed` with a stored report. The real diff was 522 characters. Quality: SQL injection found, severity too low (`MEDIUM`), no `line`, and a stray heading line from `analysis_summary` (see "First real review"). No code changed in this step.

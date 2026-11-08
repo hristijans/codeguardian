@@ -9,7 +9,7 @@ Status key: ✅ Done · 🔄 In progress · 🔍 Built, not verified · ⬜ Not 
 
 ## Current focus
 
-**Next step: 3.9 Real review with Ollama.** Unit 3 is under way. The analysis node puts the title and the line-numbered diff in randomly marked blocks, `limit_diff` keeps diffs to 6,000 characters (sized to this CPU's measured 11 tokens/s and Ollama's 4,096-token window), and `llama3.2` now fills in `line` on the SQL fixture. The worker now runs the graph and stores the report on the job. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
+**Next step: 3.10 Learning notes for Unit 3.** The first live review (3.9) worked but showed three quality gaps: severity too low, no `line`, and a heading-like summary. Unit 3 is under way. The analysis node puts the title and the line-numbered diff in randomly marked blocks, `limit_diff` keeps diffs to 6,000 characters (sized to this CPU's measured 11 tokens/s and Ollama's 4,096-token window), and `llama3.2` now fills in `line` on the SQL fixture. The worker now runs the graph and stores the report on the job. Step 0.11 is still open: Ollama and the published Compose ports are reachable from the local network, and should be locked down before the stack holds anything real.
 
 ## How to use this plan
 
@@ -72,7 +72,7 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 | 3.6 | `format_report_node` | Markdown report is produced | ✅ |
 | 3.7 | Graph assembly `src/agent/graph.py` | Graph runs start to end with a mocked LLM | ✅ |
 | 3.8 | Worker integration | A job's report is stored, with failures marked `failed` | ✅ |
-| 3.9 | Real review with Ollama | A real PR diff gets a stored review, with quality noted | ⬜ |
+| 3.9 | Real review with Ollama | A real PR diff gets a stored review, with quality noted | ✅ |
 | 3.10 | Learning notes `unit-3-*.md` | Notes, libraries, and decisions are updated | ⬜ |
 
 ## Unit 4: Multi-agent and checkpointing
@@ -157,3 +157,4 @@ The Unit 1 files (`docker-compose.yml`, `Dockerfile`, `src/config.py`, `src/main
 - 2026-11-04: Added `format_report_node` in `src/agent/report.py`, a plain-code Markdown layout that cleans the model's text for GitHub (mentions, HTML, links, headings): 244 passed, and six deliberate breaks caught (step 3.6). Next: step 3.7.
 - 2026-11-04: Added `build_graph` in `src/agent/graph.py` (analyze_diff then format_report): 262 passed including the real-model graph run, and three of four deliberate breaks caught, the fourth changing no behaviour (step 3.7). Next: step 3.8.
 - 2026-11-04: The worker now cuts the diff, runs the graph, and stores the report on the job (`report` field); an unusable model reply fails the job, other errors retry once: 270 passed including a real-model run through the worker, and six deliberate breaks caught (step 3.8). Next: step 3.9, which needs a live PR and the owner's real token.
+- 2026-11-08: Ran a live review on a real PR through the relay (step 3.9): the SQL injection was found and the report stored, but severity was `MEDIUM`, `line` was empty, and the summary read like a heading. The first delivery was filtered because the api container held a stale `REVIEW_REPOSITORIES`; recreating `api` and `worker` fixed it. Next: step 3.10.
