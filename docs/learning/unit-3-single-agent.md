@@ -1,8 +1,32 @@
 # Unit 3: Single-Agent Code Review
 
-Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file grows as the unit is built, and it only describes what exists so far.
+Unit 3 replaces the worker's simulated review with a LangGraph agent that reviews the diff with a local LLM. This file describes what was built in steps 3.1 to 3.9 and 3.11. Review quality is not finished: see "First real review" for the three gaps the first live run showed.
 
-**Files so far:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`, `src/agent/graph.py`, `tests/test_agent_graph.py`, `src/worker.py` (changed), `tests/fakes.py`
+**Files:** `docker-compose.yml`, `tests/test_ollama.py`, `pytest.ini`, `src/agent/llm.py`, `tests/test_llm.py`, `src/agent/schemas.py`, `src/agent/state.py`, `tests/test_agent_state.py`, `src/agent/nodes.py`, `tests/test_agent_nodes.py`, `tests/fixtures/diffs/`, `src/agent/diff.py`, `tests/test_agent_diff.py`, `src/agent/report.py`, `tests/test_agent_report.py`, `src/agent/graph.py`, `tests/test_agent_graph.py`, `src/worker.py` (changed), `tests/fakes.py`
+
+## Flow overview
+
+```text
+worker.process_job
+  fetch_diff ──▶ limit_diff (6,000 chars) ──▶ graph.ainvoke
+                                                │
+                    analyze_diff_node ──────────┤  number_diff, random-coded blocks,
+                    (one LLM call, structured)  │  CodeAuditReport, risk raised in code
+                                                ▼
+                    format_report_node ─────────▶ final_summary (Markdown, no LLM)
+  save job: completed + report      (AnalysisError ─▶ failed; other errors ─▶ retry once)
+```
+
+| Part | File |
+|---|---|
+| Model access and choice | `docker-compose.yml`, `src/agent/llm.py` |
+| Report and state shapes | `src/agent/schemas.py`, `src/agent/state.py` |
+| Review node and prompt | `src/agent/nodes.py` |
+| Untrusted diff, size, line numbers | `src/agent/diff.py` |
+| Markdown report | `src/agent/report.py` |
+| Graph and worker | `src/agent/graph.py`, `src/worker.py` |
+
+Laravel comparison: the worker is a queued job, the graph is its handler split into steps that share one typed state, and `get_chat_model()` is a driver manager like `Cache::driver()`.
 
 ## Reaching Ollama from the containers
 
@@ -23,7 +47,7 @@ extra_hosts:
 
 `host-gateway` is a special value that Docker replaces with the host's address on its default bridge network. Here that's `172.17.0.1`, the `docker0` interface. Compose writes the mapping into the container's `/etc/hosts`, the same file that maps names on any Linux machine. `getent hosts host.docker.internal` inside the container shows it.
 
-Both `api` and `worker` have the setting. The worker is what will call the model, and the API gets it so the checks can run from `docker compose exec api pytest` like every other test.
+Both `api` and `worker` have the setting. The worker is what calls the model, and the API gets it so the checks can run from `docker compose exec api pytest` like every other test.
 
 ### 2. The address Ollama listens on: `OLLAMA_HOST`
 
@@ -163,7 +187,7 @@ Finding
 
 ### The schema is part of the prompt
 
-From step 3.4, the node will call `model.with_structured_output(CodeAuditReport)`. With its default `method="json_schema"`, `ChatOllama` turns the class into a JSON schema with `CodeAuditReport.model_json_schema()` and sends it as Ollama's `format` option, which constrains the reply to JSON in that shape. The reply is then parsed back into a `CodeAuditReport`, so validation still runs. So every `Field(description=...)` is text the model reads, and that's why every field has one. A test checks that none is missing. This is different from a Laravel FormRequest, whose rules only check input after it arrives. Here the same class also tells the sender what to send.
+The node calls `model.with_structured_output(CodeAuditReport)`. With its default `method="json_schema"`, `ChatOllama` turns the class into a JSON schema with `CodeAuditReport.model_json_schema()` and sends it as Ollama's `format` option, which constrains the reply to JSON in that shape. The reply is then parsed back into a `CodeAuditReport`, so validation still runs. So every `Field(description=...)` is text the model reads, and that's why every field has one. A test checks that none is missing. This is different from a Laravel FormRequest, whose rules only check input after it arrives. Here the same class also tells the sender what to send.
 
 The fields are kept few and flat on purpose. A 3B model handles a short schema better than a deep one.
 
@@ -194,7 +218,7 @@ security_vulnerabilities: Annotated[list[dict[str, Any]], operator.add]
 
 `Annotated[type, extra]` attaches extra information to a type hint without changing the type. LangGraph reads the extra, `operator.add`, which is the function behind `+`. For lists, `+` joins them, so `old + new` keeps every finding.
 
-This matters when nodes run in parallel, as the security and quality agents will in Unit 4. `tests/test_agent_state.py` builds a small graph where `START` leads to two nodes, `a` and `b`, which run in the same step:
+This matters when nodes run in parallel, as the security and quality agents will in Unit 4 (planned). `tests/test_agent_state.py` builds a small graph where `START` leads to two nodes, `a` and `b`, which run in the same step:
 
 - Both add a finding to `security_vulnerabilities`, and the result holds the initial finding plus both new ones.
 - Both write `overall_risk_score`, which has no reducer, and LangGraph raises `InvalidUpdateError`: it can't tell which write should win, so it refuses to guess.
@@ -236,7 +260,7 @@ def make_analyze_diff_node(model: BaseChatModel) -> Node:
     return analyze_diff_node
 ```
 
-The graph builder (step 3.7) will call `make_analyze_diff_node(get_chat_model())`, and tests call it with a fake. This is constructor injection without a class. `with_structured_output` runs once, when the node is built, not on every review. `Node` is a type alias for "an async function from state to a dict".
+The graph builder (`build_graph`, step 3.7) calls `make_analyze_diff_node(get_chat_model())`, and tests call it with a fake. This is constructor injection without a class. `with_structured_output` runs once, when the node is built, not on every review. `Node` is a type alias for "an async function from state to a dict".
 
 ### The messages
 
@@ -260,7 +284,7 @@ The prompt was tried against `llama3.2` with the two fixture diffs, one SQL inje
 
 The lesson: a small model treats a list of examples in the prompt as a list of things to report. Saying that "no problems" is a normal answer helped more than describing what to look for. Shorter replies also make reviews faster, because writing the reply runs at about 5 tokens per second. Ollama reported 0.2 seconds of reading time for the 430-token prompt in that 85-second run, but step 3.5 found that this was Ollama reusing its cache of an identical earlier prompt. Reading new text runs at about 11 tokens per second (see "Diff size limit").
 
-`line` was `null` in every run, even with the prompt explaining how to count from the `@@` header. Step 3.11 is planned to number the added lines in code, before the diff is sent.
+`line` was `null` in every run, even with the prompt explaining how to count from the `@@` header. Step 3.11 then numbered the added lines in code, before the diff is sent.
 
 ### What the node returns
 
@@ -479,7 +503,7 @@ _This is an automated review by a language model. ..._
 
 ### Cleaning the model's text
 
-A finding's text came from a model reading an untrusted diff, and the Markdown will be posted on GitHub. Without cleaning, a diff could make the model write `@someone` (pinging a real user), `<!-- hidden -->` or `<img>` (hiding text or loading an image), a `[link](url)`, or a newline followed by `## Approved` (a fake heading). `_inline` collapses the text to one line, escapes HTML with `html.escape(quote=False)`, puts a zero-width space after every `@` that starts a name so it no longer mentions anyone, and escapes `[` and `]`. `_code` builds the file path's code span with backticks removed so the path can't close it. Laravel's `e()` and Blade's `{{ }}` do the HTML part of this for you; Markdown has no such built-in, so it's done by hand.
+A finding's text came from a model reading an untrusted diff, and the Markdown is meant to be posted on GitHub (step 5.1, not built yet). Without cleaning, a diff could make the model write `@someone` (pinging a real user), `<!-- hidden -->` or `<img>` (hiding text or loading an image), a `[link](url)`, or a newline followed by `## Approved` (a fake heading). `_inline` collapses the text to one line, escapes HTML with `html.escape(quote=False)`, puts a zero-width space after every `@` that starts a name so it no longer mentions anyone, and escapes `[` and `]`. `_code` builds the file path's code span with backticks removed so the path can't close it. Laravel's `e()` and Blade's `{{ }}` do the HTML part of this for you; Markdown has no such built-in, so it's done by hand.
 
 ### Tests
 
@@ -493,7 +517,7 @@ A finding's text came from a model reading an untrusted diff, and the Markdown w
 
 `build_graph(model=None)` makes a `StateGraph(PRAnalysisState)`, registers the two nodes under the names `analyze_diff` and `format_report`, joins them with `add_edge`, and returns `builder.compile()`. Compiling checks the blueprint, such as an edge that names a missing node, and gives a runnable object with `ainvoke(state)`. It returns the final state, so `result["final_summary"]` is the Markdown report. The nearest Laravel idea is a fixed `Pipeline` of two pipes, except each stage returns only the keys it changes and the framework merges them.
 
-**The model is passed in, and built when the graph is built.** Tests give `build_graph` a fake. The worker will call it with no argument, and `get_chat_model()` picks the provider from `LLM_PROVIDER`. The curriculum shows a module-level `app_graph`, but that would read settings and build a model whenever anything imports the module, including the tests, so a function was used instead (D32).
+**The model is passed in, and built when the graph is built.** Tests give `build_graph` a fake. The worker calls it with no argument, and `get_chat_model()` picks the provider from `LLM_PROVIDER`. The curriculum shows a module-level `app_graph`, but that would read settings and build a model whenever anything imports the module, including the tests, so a function was used instead (D32).
 
 **What the worker has to give it.** The job's fields (`job_id`, `repo_name`, `pr_number`, `head_sha`, `title`, `diff_text`, `diff_truncated`) and nothing else. The two finding lists aren't needed in the input: the reducers start them empty, and the tests check that two runs of one graph don't add up their findings. The worker also has to call `limit_diff` first, which is step 3.8.
 

@@ -30,7 +30,7 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **What it does:** Validates data against classes built from type hints.
 
-**Why it is used:** FastAPI builds on it for requests and responses. It will also validate LLM output in Unit 3, where bad data is a normal occurrence.
+**Why it is used:** FastAPI builds on it for requests and responses. It also validates the LLM's reply in Unit 3 (`CodeAuditReport`), where bad data is a normal occurrence.
 
 **Laravel equivalent:** FormRequest validation, plus API Resources for output.
 
@@ -118,7 +118,7 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **What it does:** The base layer of LangChain: message types (`HumanMessage`, `AIMessage`), the `BaseChatModel` interface every chat model implements, and the "Runnable" methods on it such as `ainvoke`, `astream`, and `with_structured_output`.
 
-**Why it is used:** It gives the agent one interface for every provider, so nodes don't change when the model does. LangGraph, coming in step 3.7, builds on the same package. Listing it directly, instead of relying on `langchain-ollama` to pull it in, is because `src/agent/llm.py` imports it directly.
+**Why it is used:** It gives the agent one interface for every provider, so nodes don't change when the model does. LangGraph, used since step 3.7, builds on the same package. Listing it directly, instead of relying on `langchain-ollama` to pull it in, is because `src/agent/llm.py` imports it directly.
 
 **Alternatives:** Calling the Ollama HTTP API with `httpx`, as `tests/test_ollama.py` does. That's fine for a connection check, but structured output, retries, and swapping providers would all have to be written by hand. The full `langchain` package, which adds chains and agents this project gets from LangGraph instead.
 
@@ -148,7 +148,7 @@ Versions in `requirements.txt` are minimums, not exact pins, so a rebuild can in
 
 **Laravel equivalent:** No direct match. It's closest to a job pipeline or `Bus::chain`, where each job hands its result on, but with a shared state, branching, and parallel steps.
 
-**Where it is used:** So far only `tests/test_agent_state.py`. `src/agent/state.py` defines the state it will use and doesn't import it.
+**Where it is used:** `src/agent/graph.py` builds the two-node `StateGraph`, and `tests/test_agent_state.py` uses it to test the reducers. `src/agent/state.py` defines the state and doesn't import it.
 
 ## Development tools
 
